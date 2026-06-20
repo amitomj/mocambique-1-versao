@@ -1,0 +1,469 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect } from 'react';
+import { X, Plus, Trash2, Home, CheckCircle2, User, Phone, Mail, Award, Calendar, CreditCard } from 'lucide-react';
+import { IntervenienteFicha, MoradaItem, getIntervenientes } from '../utils/participants';
+
+interface FichaIntervenienteModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (ficha: IntervenienteFicha) => void;
+  tipo: 'autor' | 'reu' | 'procurador';
+  initialNome?: string;
+  existingFicha?: IntervenienteFicha;
+}
+
+export default function FichaIntervenienteModal({
+  isOpen,
+  onClose,
+  onSave,
+  tipo,
+  initialNome = '',
+  existingFicha
+}: FichaIntervenienteModalProps) {
+  const [nome, setNome] = useState('');
+  const [nuit, setNuit] = useState('');
+  const [nomePai, setNomePai] = useState('');
+  const [nomeMae, setNomeMae] = useState('');
+  const [dataNascimento, setDataNascimento] = useState('');
+  const [bilheteIdentidade, setBilheteIdentidade] = useState('');
+  const [profissao, setProfissao] = useState('');
+  const [telefone, setTelefone] = useState('');
+  const [email, setEmail] = useState('');
+  
+  // Multiple addresses state
+  const [moradas, setMoradas] = useState<MoradaItem[]>([]);
+  const [novaMorada, setNovaMorada] = useState('');
+  
+  const [errorMsg, setErrorMsg] = useState('');
+
+  // Prefill when open
+  useEffect(() => {
+    if (isOpen) {
+      if (existingFicha) {
+        setNome(existingFicha.nome || '');
+        setNuit(existingFicha.nuit || '');
+        setNomePai(existingFicha.nomePai || '');
+        setNomeMae(existingFicha.nomeMae || '');
+        setDataNascimento(existingFicha.dataNascimento || '');
+        setBilheteIdentidade(existingFicha.bilheteIdentidade || '');
+        setProfissao(existingFicha.profissao || '');
+        setMoradas(existingFicha.moradas || []);
+        setTelefone(existingFicha.telefone || '');
+        setEmail(existingFicha.email || '');
+      } else {
+        setNome(initialNome);
+        setNuit('');
+        setNomePai('');
+        setNomeMae('');
+        setDataNascimento('');
+        setBilheteIdentidade('');
+        setProfissao('');
+        setMoradas([]);
+        setTelefone('');
+        setEmail('');
+      }
+      setNovaMorada('');
+      setErrorMsg('');
+    }
+  }, [isOpen, existingFicha, initialNome]);
+
+  if (!isOpen) return null;
+
+  const handleNuitChange = (val: string) => {
+    const cleanVal = val.replace(/\D/g, ''); // Keep only digits
+    setNuit(cleanVal);
+    
+    // NUIT length is typically 9 digits in Mozambique
+    if (cleanVal.length === 9) {
+      const allInters = getIntervenientes();
+      const duplicate = allInters.find(i => i.nuit === cleanVal && i.nome.trim().toLowerCase() !== (existingFicha?.nome || '').trim().toLowerCase());
+      if (duplicate) {
+        const copy = window.confirm(`ATENÇÃO: Foi detetado o interveniente "${duplicate.nome}" com o mesmo NUIT (${cleanVal})!\n\nDeseja copiar e herdar os dados registados (filiação, data nascimento, moradas, contactos e profissão) desta pessoa/empresa?`);
+        if (copy) {
+          setNome(duplicate.nome);
+          setNomePai(duplicate.nomePai || '');
+          setNomeMae(duplicate.nomeMae || '');
+          setDataNascimento(duplicate.dataNascimento || '');
+          setBilheteIdentidade(duplicate.bilheteIdentidade || '');
+          setProfissao(duplicate.profissao || '');
+          setMoradas(duplicate.moradas || []);
+          setTelefone(duplicate.telefone || '');
+          setEmail(duplicate.email || '');
+        }
+      }
+    }
+  };
+
+  const handleAddMorada = () => {
+    const addressStr = novaMorada.trim();
+    if (!addressStr) return;
+    
+    const isFirst = moradas.length === 0;
+    const newItem: MoradaItem = {
+      id: `morada-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      endereco: addressStr,
+      isAtual: isFirst // Mark as active if it's the first one
+    };
+    
+    setMoradas([...moradas, newItem]);
+    setNovaMorada('');
+  };
+
+  const handleMarkAsAtual = (id: string) => {
+    setMoradas(prev => prev.map(m => ({
+      ...m,
+      isAtual: m.id === id
+    })));
+  };
+
+  const handleRemoveMorada = (id: string) => {
+    setMoradas(prev => {
+      const filtered = prev.filter(m => m.id !== id);
+      // If we deleted the active one and list still has items, mark the first one as active
+      if (filtered.length > 0 && !filtered.some(m => m.isAtual)) {
+        filtered[0].isAtual = true;
+      }
+      return filtered;
+    });
+  };
+
+  const handleFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+
+    if (!nome.trim()) {
+      setErrorMsg('O nome é um campo obrigatório.');
+      return;
+    }
+
+    if (!nuit.trim()) {
+      setErrorMsg('O NUIT é um campo obrigatório.');
+      return;
+    }
+
+    if (nuit.trim().length !== 9) {
+      setErrorMsg('O NUIT deve conter exatamente 9 dígitos.');
+      return;
+    }
+
+    const savedFicha: IntervenienteFicha = {
+      nome: nome.trim(),
+      nuit: nuit.trim() || undefined,
+      nomePai: tipo === 'procurador' ? 'N/D' : (nomePai.trim() || 'N/D'),
+      nomeMae: tipo === 'procurador' ? 'N/D' : (nomeMae.trim() || 'N/D'),
+      dataNascimento: tipo === 'procurador' ? 'N/D' : (dataNascimento || 'N/D'),
+      bilheteIdentidade: tipo === 'procurador' ? 'N/D' : (bilheteIdentidade.trim() || 'N/D'),
+      profissao: tipo === 'procurador' ? 'Procurador' : (profissao.trim() || 'N/D'),
+      moradas: moradas,
+      telefone: tipo === 'procurador' ? 'N/D' : (telefone.trim() || 'N/D'),
+      email: tipo === 'procurador' ? 'N/D' : (email.trim() || 'N/D'),
+      tipo
+    };
+
+    onSave(savedFicha);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
+        
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+          <div className="flex items-center gap-2">
+            <div className={`p-1.5 rounded-lg ${
+              tipo === 'procurador' 
+                ? 'bg-emerald-100 text-emerald-700' 
+                : tipo === 'autor' 
+                ? 'bg-indigo-100 text-indigo-700' 
+                : 'bg-rose-100 text-rose-700'
+            }`}>
+              <User className="h-4 w-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-tight font-display">
+                Ficha de Interveniente — {tipo === 'procurador' ? 'Procurador' : tipo === 'autor' ? 'Autor (Requerente)' : 'Réu (Requerido)'}
+              </h3>
+              <p className="text-[10px] text-slate-500 font-medium">
+                {tipo === 'procurador' 
+                  ? 'Preencha os dados profissionais e as moradas para expedição de notificações' 
+                  : 'Preencha os dados completos para registo em autos e indexação física'}
+              </p>
+            </div>
+          </div>
+          <button 
+            type="button" 
+            onClick={onClose} 
+            className="p-1.5 hover:bg-slate-200 text-slate-400 hover:text-slate-700 rounded-lg transition-colors cursor-pointer"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Scrollable Body */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs text-slate-700">
+          {errorMsg && (
+            <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-2.5 rounded-lg font-semibold">
+              {errorMsg}
+            </div>
+          )}
+
+          <form onSubmit={handleFormSubmit} className="space-y-5">
+            {/* Secção 1: Identificação */}
+            <div className="space-y-3">
+              <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-1">
+                1. Identificação {tipo === 'procurador' ? 'Profissional' : 'Pessoal'}
+              </h4>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="md:col-span-2 space-y-1">
+                  <label className="block text-[11px] font-semibold text-slate-600">Nome Completo *</label>
+                  <input
+                    type="text"
+                    value={nome}
+                    onChange={(e) => setNome(e.target.value)}
+                    placeholder={tipo === 'procurador' ? 'Ex: Dr. António dos Santos (Procurador)' : 'Ex: João Silva Martins'}
+                    className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-medium focus:border-blue-500 focus:outline-hidden"
+                    required
+                  />
+                </div>
+
+                <div className="md:col-span-2 space-y-1 animate-in fade-in duration-155">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-[11px] font-semibold text-slate-600">Número de Identificação Tributária (NUIT) *</label>
+                    <span className="text-[9px] text-indigo-700 bg-indigo-50 border border-indigo-150 px-2 py-0.5 rounded font-bold uppercase tracking-wide">Moçambique</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={nuit}
+                    onChange={(e) => handleNuitChange(e.target.value)}
+                    placeholder="Ex: 142398455 (9 dígitos)"
+                    className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-medium font-mono focus:border-blue-500 focus:outline-hidden"
+                    maxLength={9}
+                    required
+                  />
+                </div>
+
+                {tipo !== 'procurador' && (
+                  <>
+                    <div className="space-y-1">
+                      <label className="block text-[11px] font-semibold text-slate-600">Filiação (Nome do Pai)</label>
+                      <input
+                        type="text"
+                        value={nomePai}
+                        onChange={(e) => setNomePai(e.target.value)}
+                        placeholder="Ex: Carlos Neves Martins"
+                        className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-medium focus:border-blue-500 focus:outline-hidden"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-[11px] font-semibold text-slate-600">Filiação (Nome da Mãe)</label>
+                      <input
+                        type="text"
+                        value={nomeMae}
+                        onChange={(e) => setNomeMae(e.target.value)}
+                        placeholder="Ex: Maria Teresa Silva"
+                        className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-medium focus:border-blue-500 focus:outline-hidden"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-[11px] font-semibold text-slate-600">Data de Nascimento</label>
+                      <div className="relative">
+                        <Calendar className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                        <input
+                          type="date"
+                          value={dataNascimento}
+                          onChange={(e) => setDataNascimento(e.target.value)}
+                          className="w-full rounded-lg bg-slate-50 border border-slate-200 pl-8 pr-3 py-2 text-xs font-medium font-mono focus:border-blue-500 focus:outline-hidden"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-[11px] font-semibold text-slate-600">Bilhete de Identidade / CC</label>
+                      <div className="relative">
+                        <CreditCard className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                        <input
+                          type="text"
+                          value={bilheteIdentidade}
+                          onChange={(e) => setBilheteIdentidade(e.target.value)}
+                          placeholder="Ex: 12458900-3-ZZ4"
+                          className="w-full rounded-lg bg-slate-50 border border-slate-200 pl-8 pr-3 py-2 text-xs font-medium font-mono focus:border-blue-500 focus:outline-hidden"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-2 space-y-1">
+                      <label className="block text-[11px] font-semibold text-slate-600">Profissão</label>
+                      <div className="relative">
+                        <Award className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                        <input
+                          type="text"
+                          value={profissao}
+                          onChange={(e) => setProfissao(e.target.value)}
+                          placeholder="Ex: Engenheiro de Software ou Reformado"
+                          className="w-full rounded-lg bg-slate-50 border border-slate-200 pl-8 pr-3 py-2 text-xs font-medium focus:border-blue-500 focus:outline-hidden"
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Secção 2: Contactos */}
+            {tipo !== 'procurador' && (
+              <div className="space-y-3">
+                <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-1">
+                  2. Informações de Contacto
+                </h4>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="block text-[11px] font-semibold text-slate-600">Telefone / Telemóvel</label>
+                    <div className="relative">
+                      <Phone className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                      <input
+                        type="tel"
+                        value={telefone}
+                        onChange={(e) => setTelefone(e.target.value)}
+                        placeholder="Ex: 912 345 678"
+                        className="w-full rounded-lg bg-slate-50 border border-slate-200 pl-8 pr-3 py-2 text-xs font-medium font-mono focus:border-blue-500 focus:outline-hidden"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="block text-[11px] font-semibold text-slate-600">Endereço de Email</label>
+                    <div className="relative">
+                      <Mail className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="Ex: joao.martins@exemplo.com"
+                        className="w-full rounded-lg bg-slate-50 border border-slate-200 pl-8 pr-3 py-2 text-xs font-medium font-mono focus:border-blue-500 focus:outline-hidden"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Secção 3: Moradas (Múltiplas com Ativa) */}
+            <div className="space-y-3">
+              <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 pb-1">
+                {tipo === 'procurador' ? '2. Moradas Profissionais' : '3. Endereços Censitários (Moradas)'}
+              </h4>
+
+              <p className="text-[10px] text-slate-500">
+                {tipo === 'procurador'
+                  ? 'Pode registar múltiplas moradas profissionais. Marque com o indicador (morada atual) o endereço ativo de momento.'
+                  : 'Pode registar múltiplas moradas. Marque com o indicador (morada atual) o endereço onde deverão ser expedidas as notificações judiciais neste momento.'}
+              </p>
+
+              {/* Input row */}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={novaMorada}
+                  onChange={(e) => setNovaMorada(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddMorada();
+                    }
+                  }}
+                  placeholder={tipo === 'procurador' ? 'Escreva um endereço profissional completo...' : 'Escreva um endereço completo que deseja registar...'}
+                  className="flex-1 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs font-medium focus:border-blue-500 focus:outline-hidden"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddMorada}
+                  className="px-3 bg-slate-800 hover:bg-slate-705 text-white rounded-lg text-xs font-bold transition-all cursor-pointer inline-flex items-center gap-1 shrink-0"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Adicionar
+                </button>
+              </div>
+
+              {/* List of addresses */}
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {moradas.map((m) => (
+                  <div key={m.id} className={`flex items-center justify-between p-3 border rounded-xl transition-all ${
+                    m.isAtual 
+                      ? 'bg-blue-50/50 border-blue-200' 
+                      : 'bg-slate-50 border-slate-150'
+                  }`}>
+                    <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                      <Home className={`h-4 w-4 mt-0.5 shrink-0 ${m.isAtual ? 'text-blue-600' : 'text-slate-400'}`} />
+                      <div className="text-[11px] leading-relaxed text-slate-800 font-medium min-w-0">
+                        <p className="break-words font-medium">{m.endereco}</p>
+                        {m.isAtual && (
+                          <span className="inline-flex items-center gap-1 text-[9px] text-blue-700 font-bold bg-blue-100/50 px-1.5 py-0.2 rounded-md mt-1">
+                            <CheckCircle2 className="h-2.5 w-2.5" />
+                            {tipo === 'procurador' ? 'Morada Profissional Atual' : 'Morada Atual Recomendada para Notificação'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 ml-3 shrink-0">
+                      {!m.isAtual && (
+                        <button
+                          type="button"
+                          onClick={() => handleMarkAsAtual(m.id)}
+                          className="px-2 py-1 border border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-350 text-[10px] font-bold text-slate-600 rounded-lg transition-all cursor-pointer"
+                        >
+                          Marcar como Atual
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveMorada(m.id)}
+                        className="p-1.5 border border-red-100 hover:bg-red-50 text-red-500 hover:text-red-700 rounded-lg transition-all cursor-pointer"
+                        title="Remover morada"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                {moradas.length === 0 && (
+                  <div className="text-center py-4 text-slate-400 italic bg-slate-50 border border-dashed border-slate-150 rounded-xl">
+                    Nenhuma morada registada. Adicione uma no formulário acima.
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            {/* Form actionsFooter */}
+            <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-3 -mx-6 -mb-6 mt-6">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-all cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-all cursor-pointer"
+              >
+                {tipo === 'procurador' ? 'Confirmar e Registar Procurador' : 'Confirmar e Registar Interveniente'}
+              </button>
+            </div>
+          </form>
+        </div>
+
+      </div>
+    </div>
+  );
+}

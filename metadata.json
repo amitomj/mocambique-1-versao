@@ -1,0 +1,8 @@
+{
+  "name": "Moçambique - gestor de processos offline",
+  "description": "Aplicação offline-first com simulação de SQLite para registo, upload, pesquisa e impressão de processos e documentos jurídicos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
