@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type UserRole = 'administrador' | 'utilizador';
+export type UserRole = 'administrador' | 'utilizador' | 'juiz' | 'procurador' | 'funcionario' | 'advogado';
 
 export interface Tribunal {
   id: string; // Dynamic ID, e.g. UUID
@@ -39,6 +39,9 @@ export interface User {
   password?: string; // Stored safely in local SQLite-first mock DB
   createdAt: string;
   tribunalId?: string; // Association with a Court
+  needsSetup?: boolean; // True if the user needs to change credentials on first login
+  fullName?: string; // Real full name of the judge/procurador/funcionario
+  active?: boolean; // If false, the user is inactive and cannot log in
 }
 
 export interface HistoricoAto {

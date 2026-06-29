@@ -37,7 +37,7 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { Processo, Documento, User as ActiveUserType, FormModelo, ProcessNotificacao, HistoricoAto } from '../types';
-import { getFormModelos, getNotificacoes, saveNotificacao, getTribunais, generateId, getDocumentClassifications, getProcessos, getJuizes, getProcuradores, getFuncionarios } from '../utils/storage';
+import { getFormModelos, getNotificacoes, saveNotificacao, getTribunais, generateId, getDocumentClassifications, getProcessos, getJuizes, getProcuradores, getFuncionarios, isUserAssociatedWithProcess, isUserNativelyAssociatedWithProcess, getUserPermissionForProcess, getUsers, isAuthorizationActive } from '../utils/storage';
 import { logAction } from '../utils/auditLogger';
 import { getIntervenientes, getAdvogadosFichas, getIntervenienteNuitByNome } from '../utils/participants';
 import { CIVIL_HIERARCHY, getCustomProcessAllowedActs, getCustomProcessAllowedPhases, DEFAULT_FASES } from '../utils/civilHierarchy';
@@ -178,13 +178,31 @@ export default function ProcessoDetail({
   onOpenFile,
   onPrintFile,
   onDownloadFile,
-  onAddDocumentToProcesso,
+  onAddDocumentToProcesso: rawAddDocument,
   onDeleteProcesso,
   onConsultarFicha,
-  onUpdateProcesso,
+  onUpdateProcesso: rawUpdateProcesso,
   onSelectProcesso,
   isNewTabMode
 }: ProcessoDetailProps) {
+  const isReadOnly = getUserPermissionForProcess(currentUser, processo) === 'consulta';
+
+  const onUpdateProcesso = (updated: Processo) => {
+    if (isReadOnly) {
+      alert('Operação não permitida: O seu nível de acesso para este processo é de apenas consulta (leitura).');
+      return;
+    }
+    rawUpdateProcesso?.(updated);
+  };
+
+  const onAddDocumentToProcesso = (numeroProcesso: string, doc: Documento) => {
+    if (isReadOnly) {
+      alert('Operação não permitida: O seu nível de acesso para este processo é de apenas consulta (leitura).');
+      return;
+    }
+    rawAddDocument?.(numeroProcesso, doc);
+  };
+
   const getProcessClerk = () => {
     if (processo.funcionarios && processo.funcionarios.length > 0) return processo.funcionarios[0];
     const all = getFuncionarios();
@@ -292,7 +310,7 @@ export default function ProcessoDetail({
     return list[0]?.id || '';
   });
    const [editedNotifTexto, setEditedNotifTexto] = useState('');
-  const [activeTabSubProcess, setActiveTabSubProcess] = useState<'documentos' | 'estado' | 'timeline' | 'apensos'>('timeline');
+  const [activeTabSubProcess, setActiveTabSubProcess] = useState<'documentos' | 'estado' | 'timeline' | 'apensos' | 'partilha'>('timeline');
 
   // State variables for the "Estado" and "Alarme" options
   const [isFormEstadoOpen, setIsFormEstadoOpen] = useState(false);
@@ -360,6 +378,35 @@ export default function ProcessoDetail({
       localStorage.setItem(`comments_timeline_${processo.numero}`, JSON.stringify(updated));
       return updated;
     });
+  };
+
+  // States for peer-to-peer sharing tab
+  const [selectedGrantee, setSelectedGrantee] = useState('');
+  const [selectedGranteePerm, setSelectedGranteePerm] = useState<'consulta' | 'todos'>('consulta');
+  const [selectedGranteeLimiteData, setSelectedGranteeLimiteData] = useState('');
+  const [sharedAuthsList, setSharedAuthsList] = useState<any[]>(() => {
+    try {
+      const raw = localStorage.getItem('gestao_processos_autorizacoes_partilhadas');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return parsed.filter((item: any) => item.processoNumero === processo.numero);
+      }
+    } catch {}
+    return [];
+  });
+
+  const handleRefreshSharedAuths = () => {
+    try {
+      const raw = localStorage.getItem('gestao_processos_autorizacoes_partilhadas');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setSharedAuthsList(parsed.filter((item: any) => item.processoNumero === processo.numero));
+      } else {
+        setSharedAuthsList([]);
+      }
+    } catch {
+      setSharedAuthsList([]);
+    }
   };
 
   const [activeTimelineMenuId, setActiveTimelineMenuId] = useState<string | null>(null);
@@ -1098,13 +1145,15 @@ export default function ProcessoDetail({
             >
               {isFichaDetailsOpen ? '▲ Ocultar ficha do processo' : '📂 Abrir ficha do processo (ver dados completos)'}
             </button>
-            <button
-              type="button"
-              onClick={() => setIsMetadataExpanded(!isMetadataExpanded)}
-              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-3xs flex items-center gap-1.5 select-none hover:scale-[1.01]"
-            >
-              {isMetadataExpanded ? '▲ Ocultar Formulário' : '✏️ Editar Ficha de Autuação (13 Campos)'}
-            </button>
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={() => setIsMetadataExpanded(!isMetadataExpanded)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer shadow-3xs flex items-center gap-1.5 select-none hover:scale-[1.01]"
+              >
+                {isMetadataExpanded ? '▲ Ocultar Formulário' : '✏️ Editar Ficha de Autuação (13 Campos)'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -3042,8 +3091,18 @@ export default function ProcessoDetail({
 
           {/* TAB 2: MINUTAR / JURIDICAL MEMO DRAFTS DOCK */}
           {rightActiveTab === 'notificar' && (
-            <form onSubmit={handleSaveDraftAsDocument} className="space-y-4 text-xs text-slate-700 leading-normal">
-              <div className="bg-slate-50 border border-slate-150 p-4 rounded-2xl space-y-4">
+            isReadOnly ? (
+              <div className="bg-amber-50 border border-amber-250 text-amber-850 p-5 rounded-2xl text-xs space-y-2">
+                <p className="font-extrabold text-amber-900 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  ⚠️ Acesso de Apenas Consulta
+                </p>
+                <p className="font-medium text-slate-700 leading-relaxed">
+                  O seu nível de acesso autorizado para este processo permite-lhe apenas visualizar o conteúdo. A redação de minutas, despachos e outros atos judiciais está desativada.
+                </p>
+              </div>
+            ) : (
+              <form onSubmit={handleSaveDraftAsDocument} className="space-y-4 text-xs text-slate-700 leading-normal">
+                <div className="bg-slate-50 border border-slate-150 p-4 rounded-2xl space-y-4">
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider font-display border-b border-slate-150 pb-1.5">
                   📝 Minutar Novo Documento / Despacho Judicial
                 </h3>
@@ -3258,7 +3317,7 @@ export default function ProcessoDetail({
                 </button>
               </div>
             </form>
-          )}
+          ))}
 
           {/* TAB 4: CALENDAR DEADLINES SCHEDULER WIDGET */}
           {rightActiveTab === 'agenda' && (
@@ -3275,51 +3334,57 @@ export default function ProcessoDetail({
                 )}
 
                 {/* Creation form */}
-                <form onSubmit={handleAddAgendaEvent} className="space-y-3 bg-white border border-slate-150 p-3.5 rounded-xl text-xs space-y-3">
-                  <strong className="text-[10px] uppercase text-slate-405 font-bold tracking-wider block border-b border-slate-100 pb-1">Agendar Diligência / Prazo Limite</strong>
-                  
-                  <div className="space-y-1">
-                    <label className="text-[9px] text-slate-400 font-bold">Título da Diligência</label>
-                    <input
-                      type="text"
-                      value={agendaNewTitle}
-                      onChange={(e) => setAgendaNewTitle(e.target.value)}
-                      placeholder="Ex: Leitura de Sentença, Inquirição de Testemunhas"
-                      required
-                      className="w-full bg-slate-50 border p-1.5 rounded focus:outline-hidden"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
+                {!isReadOnly ? (
+                  <form onSubmit={handleAddAgendaEvent} className="space-y-3 bg-white border border-slate-150 p-3.5 rounded-xl text-xs space-y-3">
+                    <strong className="text-[10px] uppercase text-slate-405 font-bold tracking-wider block border-b border-slate-100 pb-1">Agendar Diligência / Prazo Limite</strong>
+                    
                     <div className="space-y-1">
-                      <label className="text-[9px] text-slate-400 font-bold">Data Limite *</label>
-                      <input
-                        type="date"
-                        value={agendaNewDateStr}
-                        onChange={(e) => setAgendaNewDateStr(e.target.value)}
-                        required
-                        className="w-full bg-slate-50 border p-1.5 rounded focus:outline-hidden font-mono text-slate-750"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[9px] text-slate-400 font-bold">Destinatário</label>
+                      <label className="text-[9px] text-slate-400 font-bold">Título da Diligência</label>
                       <input
                         type="text"
-                        value={agendaNewDest}
-                        onChange={(e) => setAgendaNewDest(e.target.value)}
-                        placeholder="Ex: Rui Faria, Juiz"
+                        value={agendaNewTitle}
+                        onChange={(e) => setAgendaNewTitle(e.target.value)}
+                        placeholder="Ex: Leitura de Sentença, Inquirição de Testemunhas"
+                        required
                         className="w-full bg-slate-50 border p-1.5 rounded focus:outline-hidden"
                       />
                     </div>
-                  </div>
 
-                  <button
-                    type="submit"
-                    className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition-colors shadow-3xs cursor-pointer"
-                  >
-                    Registar Novo Prazo
-                  </button>
-                </form>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className="text-[9px] text-slate-400 font-bold">Data Limite *</label>
+                        <input
+                          type="date"
+                          value={agendaNewDateStr}
+                          onChange={(e) => setAgendaNewDateStr(e.target.value)}
+                          required
+                          className="w-full bg-slate-50 border p-1.5 rounded focus:outline-hidden font-mono text-slate-750"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] text-slate-400 font-bold">Destinatário</label>
+                        <input
+                          type="text"
+                          value={agendaNewDest}
+                          onChange={(e) => setAgendaNewDest(e.target.value)}
+                          placeholder="Ex: Rui Faria, Juiz"
+                          className="w-full bg-slate-50 border p-1.5 rounded focus:outline-hidden"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition-colors shadow-3xs cursor-pointer"
+                    >
+                      Registar Novo Prazo
+                    </button>
+                  </form>
+                ) : (
+                  <div className="p-3 bg-amber-50/70 border border-amber-200 text-amber-800 rounded-xl font-medium text-[11px] leading-relaxed">
+                    ⏰ Agendamento desativado: O seu nível de acesso autorizado para este processo é de apenas consulta.
+                  </div>
+                )}
 
                 {/* Event lists */}
                 <div className="space-y-2">
@@ -3330,21 +3395,23 @@ export default function ProcessoDetail({
                     <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                       {(processo.agendaCompromissos || []).map(evt => (
                         <div key={evt.id} className="p-2.5 bg-white border border-slate-200 hover:border-slate-300 rounded-xl relative group flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (confirm('Deseja cancelar o agendamento desta diligência?')) {
-                                const updatedEvents = (processo.agendaCompromissos || []).filter(e => e.id !== evt.id);
-                                if (onUpdateProcesso) {
-                                  onUpdateProcesso({ ...processo, agendaCompromissos: updatedEvents });
+                          {!isReadOnly && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (confirm('Deseja cancelar o agendamento desta diligência?')) {
+                                  const updatedEvents = (processo.agendaCompromissos || []).filter(e => e.id !== evt.id);
+                                  if (onUpdateProcesso) {
+                                    onUpdateProcesso({ ...processo, agendaCompromissos: updatedEvents });
+                                  }
                                 }
-                              }
-                            }}
-                            className="absolute right-1 top-2.5 p-1 text-red-500 hover:text-red-700 rounded hover:bg-red-50 md:opacity-0 md:group-hover:opacity-100 transition-opacity cursor-pointer"
-                            title="Remover"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
+                              }}
+                              className="absolute right-1 top-2.5 p-1 text-red-500 hover:text-red-700 rounded hover:bg-red-50 md:opacity-0 md:group-hover:opacity-100 transition-opacity cursor-pointer"
+                              title="Remover"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          )}
                           
                           <div className="p-1 px-2.5 bg-zinc-100 border text-center min-w-[50px] rounded-lg shrink-0 flex flex-col justify-center leading-tight">
                             <span className="text-[12px] font-mono font-bold text-slate-700">{evt.dataLimite.split('-')[2]}</span>
@@ -3903,6 +3970,15 @@ export default function ProcessoDetail({
 
   const standardHeaderContent = (
     <div className="space-y-6 font-sans">
+      {getUserPermissionForProcess(currentUser, processo) === 'consulta' && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl flex items-center gap-3 text-xs shadow-xs animate-in fade-in slide-in-from-top-1 duration-200 no-print">
+          <span className="text-xl">👁️</span>
+          <div>
+            <p className="font-extrabold text-amber-900 uppercase tracking-wider text-[11px]">Modo de Apenas Consulta (Leitura)</p>
+            <p className="text-amber-800 font-semibold mt-0.5">Foi-lhe concedida autorização de consulta para este processo. Não tem permissão para praticar atos judiciais ou modificar dados.</p>
+          </div>
+        </div>
+      )}
       {processo.parentProcessoNumero && (
         <div className="bg-blue-50 border border-blue-200 text-blue-800 p-4 rounded-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 text-xs shadow-xs animate-in fade-in slide-in-from-top-1 duration-200">
           <div className="flex items-center gap-2">
@@ -3962,13 +4038,15 @@ export default function ProcessoDetail({
             </button>
           )}
 
-          <button
-            onClick={openUploadDrawer}
-            className="px-6 py-3 text-sm font-black text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl flex items-center gap-2 transition-all shadow-md hover:scale-[1.02] cursor-pointer font-display uppercase tracking-wider"
-          >
-            <Upload className="h-4.5 w-4.5" />
-            Carregar Documento
-          </button>
+          {!isReadOnly && (
+            <button
+              onClick={openUploadDrawer}
+              className="px-6 py-3 text-sm font-black text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl flex items-center gap-2 transition-all shadow-md hover:scale-[1.02] cursor-pointer font-display uppercase tracking-wider"
+            >
+              <Upload className="h-4.5 w-4.5" />
+              Carregar Documento
+            </button>
+          )}
         </div>
       </div>
 
@@ -3993,7 +4071,8 @@ export default function ProcessoDetail({
                   });
                 }
               }}
-              className="flex-1 rounded-lg border border-purple-250 bg-white px-2.5 py-1.5 text-xs font-bold text-purple-950 focus:ring-2 focus:ring-purple-200 outline-hidden cursor-pointer"
+              disabled={isReadOnly}
+              className="flex-1 rounded-lg border border-purple-250 bg-white px-2.5 py-1.5 text-xs font-bold text-purple-950 focus:ring-2 focus:ring-purple-200 outline-hidden cursor-pointer disabled:opacity-75 disabled:cursor-not-allowed"
             >
               {getProcessAllowedPhases(processo).map(f => (
                 <option key={f} value={f}>{f}</option>
@@ -4017,6 +4096,7 @@ export default function ProcessoDetail({
                   type="checkbox"
                   id="alarmeAtivoCheckBox"
                   checked={processo.alarmeAtivo ?? false}
+                  disabled={isReadOnly}
                   onChange={(e) => {
                     if (onUpdateProcesso) {
                       onUpdateProcesso({
@@ -4027,9 +4107,9 @@ export default function ProcessoDetail({
                       });
                     }
                   }}
-                  className="h-4 w-4 rounded border-amber-300 text-amber-900 focus:ring-amber-200 cursor-pointer"
+                  className="h-4 w-4 rounded border-amber-300 text-amber-900 focus:ring-amber-200 cursor-pointer disabled:opacity-75 disabled:cursor-not-allowed"
                 />
-                <label htmlFor="alarmeAtivoCheckBox" className="text-xs font-bold text-amber-950 cursor-pointer select-none">
+                <label htmlFor="alarmeAtivoCheckBox" className="text-xs font-bold text-amber-950 cursor-pointer select-none disabled:opacity-75">
                   Alarme Ativo
                 </label>
               </div>
@@ -4038,6 +4118,7 @@ export default function ProcessoDetail({
                   <input
                     type="date"
                     value={processo.alarmeData || ''}
+                    disabled={isReadOnly}
                     onChange={(e) => {
                       if (onUpdateProcesso) {
                         onUpdateProcesso({
@@ -4049,12 +4130,13 @@ export default function ProcessoDetail({
                         });
                       }
                     }}
-                    className="rounded-xl border-2 border-amber-300 px-3.5 py-2.5 text-sm text-amber-950 bg-white font-mono font-bold focus:border-amber-500 focus:outline-hidden"
+                    className="rounded-xl border-2 border-amber-300 px-3.5 py-2.5 text-sm text-amber-950 bg-white font-mono font-bold focus:border-amber-500 focus:outline-hidden disabled:opacity-75 disabled:cursor-not-allowed"
                   />
                   <input
                     type="text"
                     placeholder="Descrição do prazo (ex: Prazo para contestação)"
                     value={processo.alarmeNota || ''}
+                    disabled={isReadOnly}
                     onChange={(e) => {
                       if (onUpdateProcesso) {
                         onUpdateProcesso({
@@ -4066,7 +4148,7 @@ export default function ProcessoDetail({
                         });
                       }
                     }}
-                    className="flex-1 rounded-xl border-2 border-amber-300 px-3.5 py-2.5 text-sm font-bold text-amber-950 bg-white focus:border-amber-500 focus:outline-hidden placeholder-amber-700/60"
+                    className="flex-1 rounded-xl border-2 border-amber-300 px-3.5 py-2.5 text-sm font-bold text-amber-950 bg-white focus:border-amber-500 focus:outline-hidden placeholder-amber-700/60 disabled:opacity-75 disabled:cursor-not-allowed"
                   />
                 </div>
               )}
@@ -4129,6 +4211,22 @@ export default function ProcessoDetail({
           >
             🔗 Apensos ({apensosList.length})
           </button>
+          {currentUser && (currentUser.role === 'administrador' || isUserNativelyAssociatedWithProcess(currentUser, processo)) && ['juiz', 'procurador', 'funcionario', 'administrador'].includes(currentUser.role) && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTabSubProcess('partilha');
+                handleRefreshSharedAuths();
+              }}
+              className={`py-2 px-4.5 text-xs font-bold transition-all rounded-xl flex items-center gap-2 cursor-pointer ${
+                activeTabSubProcess === 'partilha'
+                  ? 'bg-white text-rose-955 shadow-2xs font-extrabold border border-zinc-200 text-slate-800'
+                  : 'text-slate-550 hover:text-slate-805 hover:bg-slate-50/70 border border-transparent'
+              }`}
+            >
+              🔑 Partilha & Autorizações ({sharedAuthsList.length})
+            </button>
+          )}
         </div>
 
       {activeTabSubProcess === 'documentos' && (
@@ -4281,24 +4379,28 @@ export default function ProcessoDetail({
                         <Download className="h-3.5 w-3.5" />
                         <span>Download</span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingDoc(doc)}
-                        className="p-1.5 text-zinc-500 hover:text-amber-700 hover:bg-amber-55/40 rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 text-[11px]"
-                        title="Editar metadados"
-                      >
-                        <Edit className="h-3.5 w-3.5 text-amber-500" />
-                        <span>Editar</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteDocumento(doc.id)}
-                        className="p-1.5 text-zinc-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 text-[11px]"
-                        title="Eliminar / Arquivar documento"
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-red-500" />
-                        <span>Eliminar</span>
-                      </button>
+                      {!isReadOnly && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setEditingDoc(doc)}
+                            className="p-1.5 text-zinc-500 hover:text-amber-700 hover:bg-amber-55/40 rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 text-[11px]"
+                            title="Editar metadados"
+                          >
+                            <Edit className="h-3.5 w-3.5 text-amber-500" />
+                            <span>Editar</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteDocumento(doc.id)}
+                            className="p-1.5 text-zinc-500 hover:text-red-700 hover:bg-red-50 rounded-lg transition-all cursor-pointer inline-flex items-center gap-1 text-[11px]"
+                            title="Eliminar / Arquivar documento"
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                            <span>Eliminar</span>
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );
@@ -4307,13 +4409,15 @@ export default function ProcessoDetail({
               <div className="p-8 text-center text-zinc-400 bg-zinc-50/30">
                 <FileIcon className="h-8 w-8 mx-auto mb-2 stroke-[1] text-zinc-300" />
                 <p className="text-xs">Este processo ainda não tem documentos anexados.</p>
-                <button
-                  type="button"
-                  onClick={openUploadDrawer}
-                  className="mt-2 text-xs font-medium text-zinc-900 underline hover:text-zinc-700 cursor-pointer"
-                >
-                  Adicionar primeiro documento
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={openUploadDrawer}
+                    className="mt-2 text-xs font-medium text-zinc-900 underline hover:text-zinc-700 cursor-pointer"
+                  >
+                    Adicionar primeiro documento
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -4347,7 +4451,7 @@ export default function ProcessoDetail({
                 </select>
               </div>
 
-              {!showCreateActForm && (
+              {!isReadOnly && !showCreateActForm && (
                 <button
                   type="button"
                   onClick={() => {
@@ -4988,12 +5092,12 @@ export default function ProcessoDetail({
                           className="bg-transparent border-0 p-0 text-sm font-black text-zinc-900 focus:ring-0 outline-hidden cursor-pointer"
                         >
                           <option value="">[Qualquer interveniente]</option>
-                          <option value="juiz">Juiz</option>
-                          <option value="advogado">Advogado</option>
-                          <option value="procurador">Procurador</option>
-                          <option value="funcionario">Funcionário</option>
-                          <option value="autor">Autor</option>
-                          <option value="reu">Réu</option>
+                          {processo.juizTitular && <option value="juiz">Juiz ({processo.juizTitular})</option>}
+                          {(processo.advogadosAutor?.length > 0 || processo.advogadosReu?.length > 0) && <option value="advogado">Advogado</option>}
+                          {processo.procuradores && processo.procuradores.length > 0 && <option value="procurador">Procurador</option>}
+                          {processo.funcionarios && processo.funcionarios.length > 0 && <option value="funcionario">Funcionário</option>}
+                          {processo.autores && processo.autores.length > 0 && <option value="autor">Autor</option>}
+                          {processo.reus && processo.reus.length > 0 && <option value="reu">Réu</option>}
                         </select>
                       </div>
 
@@ -6162,15 +6266,15 @@ export default function ProcessoDetail({
                 <button
                   type="button"
                   onClick={() => {
-                    if (confirm('Deseja eliminar o alarme de prazo deste processo?')) {
+                    if (confirm('Deseja eliminar este alarme? O sistema reverterá imediatamente para o prazo de segurança automático determinado por defeito.')) {
                       if (onUpdateProcesso) {
                         onUpdateProcesso({
                           ...processo,
-                          alarmeAtivo: false,
-                          alarmeTipo: undefined,
+                          alarmeAtivo: true,
+                          alarmeTipo: 'automatico',
                           alarmeData: undefined,
                           alarmeNota: undefined,
-                          alarmeSilenciado: true
+                          alarmeSilenciado: undefined
                         });
                       }
                     }
@@ -6191,13 +6295,15 @@ export default function ProcessoDetail({
               {/* Actions Row */}
               <div className="flex items-center justify-between">
                 <h5 className="text-sm font-bold text-zinc-800 uppercase tracking-wider">Histórico de Alterações de Estado</h5>
-                <button
-                  type="button"
-                  onClick={() => setIsFormEstadoOpen(!isFormEstadoOpen)}
-                  className="flex items-center gap-1.5 px-4 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 py-2.5 rounded-xl shadow-xs transition-all cursor-pointer"
-                >
-                  {isFormEstadoOpen ? 'Fechar Formulário' : 'Nova Informação'}
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => setIsFormEstadoOpen(!isFormEstadoOpen)}
+                    className="flex items-center gap-1.5 px-4 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 py-2.5 rounded-xl shadow-xs transition-all cursor-pointer"
+                  >
+                    {isFormEstadoOpen ? 'Fechar Formulário' : 'Nova Informação'}
+                  </button>
+                )}
               </div>
 
               {/* Toggleable New Estado Info Form */}
@@ -6370,45 +6476,74 @@ export default function ProcessoDetail({
 
                     {/* If Alarm is active, display nice status card */}
                     {alarmeInfo.ativo && (
-                      <div className="bg-rose-50/60 border border-rose-200 rounded-2xl p-6 shadow-sm space-y-4">
-                        <div className="flex items-start justify-between">
-                          <div className="flex items-center gap-2 text-rose-900 font-bold text-sm">
-                            <span className="animate-pulse inline-block h-2.5 w-2.5 rounded-full bg-rose-600" />
-                            {alarmeInfo.isAutomatico ? 'ALERTA AUTOMÁTICO ATIVO' : 'ALERTA DO UTILIZADOR ATIVO'}
+                      <div className={`border rounded-2xl p-6 shadow-sm space-y-4 transition-all ${
+                        alarmeInfo.isAutomatico 
+                          ? 'bg-slate-50 border-slate-200 text-slate-800' 
+                          : 'bg-rose-50/65 border-rose-200 text-rose-900'
+                      }`}>
+                        <div className="flex items-start justify-between gap-4 flex-wrap">
+                          <div className={`flex items-center gap-2 font-bold text-[11px] uppercase tracking-wider ${
+                            alarmeInfo.isAutomatico ? 'text-slate-600' : 'text-rose-950'
+                          }`}>
+                            <span className={`inline-block h-2.5 w-2.5 rounded-full ${
+                              alarmeInfo.isAutomatico ? 'bg-slate-400' : 'bg-rose-600 animate-pulse'
+                            }`} />
+                            {alarmeInfo.isAutomatico ? 'Prazo de Segurança Automático' : 'Alerta Personalizado Ativo'}
                           </div>
                           
                           <button
                             type="button"
                             onClick={() => {
-                              if (confirm('Deseja eliminar este alarme de prazo?')) {
+                              const promptMsg = alarmeInfo.isAutomatico 
+                                ? 'Deseja silenciar definitivamente este alarme automático?' 
+                                : 'Deseja eliminar este alarme personalizado? O sistema reverterá imediatamente para o alarme automático por defeito.';
+                              
+                              if (confirm(promptMsg)) {
                                 if (onUpdateProcesso) {
-                                  onUpdateProcesso({
-                                    ...processo,
-                                    alarmeAtivo: false,
-                                    alarmeTipo: undefined,
-                                    alarmeData: undefined,
-                                    alarmeNota: undefined,
-                                    alarmeSilenciado: true
-                                  });
+                                  if (alarmeInfo.isAutomatico) {
+                                    // Silencia o automático
+                                    onUpdateProcesso({
+                                      ...processo,
+                                      alarmeAtivo: false,
+                                      alarmeTipo: undefined,
+                                      alarmeData: undefined,
+                                      alarmeNota: undefined,
+                                      alarmeSilenciado: true
+                                    });
+                                  } else {
+                                    // Reverte para o automático
+                                    onUpdateProcesso({
+                                      ...processo,
+                                      alarmeAtivo: true,
+                                      alarmeTipo: 'automatico',
+                                      alarmeData: undefined,
+                                      alarmeNota: undefined,
+                                      alarmeSilenciado: undefined
+                                    });
+                                  }
                                 }
                               }
                             }}
-                            className="px-3 py-1.5 bg-red-650 text-white hover:bg-red-700 font-bold rounded-lg text-[10px] uppercase shadow-3xs cursor-pointer transition-all"
+                            className="px-2.5 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-[9px] uppercase shadow-3xs cursor-pointer transition-all"
                           >
                             Eliminar Alarme
                           </button>
                         </div>
 
-                        <hr className="border-rose-100" />
+                        <hr className={alarmeInfo.isAutomatico ? 'border-slate-200' : 'border-rose-100'} />
 
                         <div className="grid grid-cols-1 gap-2 text-xs">
                           <div>
                             <span className="text-zinc-500 block text-[10px] uppercase font-mono">Data Limite:</span>
-                            <strong className="text-rose-950 text-sm font-mono font-bold">{formatDateDot(alarmeInfo.data || '')}</strong>
+                            <strong className={`text-sm font-mono font-bold ${
+                              alarmeInfo.isAutomatico ? 'text-slate-905' : 'text-rose-950'
+                            }`}>{formatDateDot(alarmeInfo.data || '')}</strong>
                           </div>
                           <div className="mt-2">
                             <span className="text-zinc-500 block text-[10px] uppercase font-mono">Justificação do Alarme:</span>
-                            <p className="text-zinc-800 font-bold bg-white border border-rose-100/85 rounded-xl p-3 mt-1 shadow-3xs leading-relaxed">
+                            <p className={`font-bold bg-white rounded-xl p-3 mt-1 shadow-3xs leading-relaxed border ${
+                              alarmeInfo.isAutomatico ? 'text-slate-700 border-slate-150' : 'text-zinc-800 border-rose-100'
+                            }`}>
                               {alarmeInfo.justificacao}
                             </p>
                           </div>
@@ -7178,9 +7313,277 @@ export default function ProcessoDetail({
           </div>
         </div>
       )}
+
+      {activeTabSubProcess === 'partilha' && (
+        <div className="space-y-6">
+          <div className="bg-white border border-zinc-200 rounded-2xl p-6 shadow-xs">
+            <h3 className="text-sm font-bold text-zinc-900 mb-2 uppercase tracking-wider font-display flex items-center gap-1.5">
+              <span>🔑</span> Partilha de Acesso & Autorizações entre Pares
+            </h3>
+            <p className="text-xs text-zinc-500 mb-6">
+              Como {currentUser?.role === 'administrador' ? 'Administrador' : currentUser?.role === 'juiz' ? 'Magistrado' : currentUser?.role === 'procurador' ? 'Procurador' : 'Funcionário de Secretaria'}, pode delegar acesso a este processo a outros utilizadores da sua categoria profissional. Defina se a autorização é para apenas consulta ou para prática integral de atos judiciais.
+            </p>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Form Col */}
+              <div className="lg:col-span-1 bg-slate-50 border border-slate-205 p-5 rounded-xl space-y-4">
+                <h4 className="text-xs font-bold text-slate-750 uppercase tracking-wider">
+                  Conceder Nova Autorização
+                </h4>
+                
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">
+                    Utilizador Beneficiário (Par):
+                  </label>
+                  <select
+                    value={selectedGrantee}
+                    onChange={(e) => setSelectedGrantee(e.target.value)}
+                    className="w-full text-xs p-2.5 bg-white border border-slate-300 rounded-lg font-medium text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-slate-950"
+                  >
+                    <option value="">-- Selecione o Utilizador --</option>
+                    {getUsers()
+                      .filter((u: any) => {
+                        if (currentUser?.role === 'administrador') {
+                          return u.username !== currentUser?.username && !isUserNativelyAssociatedWithProcess(u, processo);
+                        }
+                        return u.role === currentUser?.role && u.username !== currentUser?.username && !isUserNativelyAssociatedWithProcess(u, processo);
+                      })
+                      .map((u: any) => (
+                        <option key={u.id || u.username} value={u.username}>
+                          {u.username} ({u.role})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">
+                    Nível de Permissão:
+                  </label>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700">
+                      <input
+                        type="radio"
+                        name="granteePerm"
+                        value="consulta"
+                        checked={selectedGranteePerm === 'consulta'}
+                        onChange={() => setSelectedGranteePerm('consulta')}
+                        className="accent-slate-900"
+                      />
+                      <span>Apenas Consulta (Leitura)</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700">
+                      <input
+                        type="radio"
+                        name="granteePerm"
+                        value="todos"
+                        checked={selectedGranteePerm === 'todos'}
+                        onChange={() => setSelectedGranteePerm('todos')}
+                        className="accent-slate-900"
+                      />
+                      <span>Praticar todos os Atos (Leitura e Escrita)</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-550 uppercase tracking-wider mb-1.5">
+                    Data Limite (Opcional):
+                  </label>
+                  <input
+                    type="date"
+                    value={selectedGranteeLimiteData}
+                    onChange={(e) => setSelectedGranteeLimiteData(e.target.value)}
+                    className="block w-full rounded-lg border border-slate-250 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-800 focus:border-slate-500 focus:outline-hidden font-mono"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1 leading-relaxed italic">
+                    * Se omitido, a autorização durará exatamente 48 horas (2 dias). Se preenchido, expirará às 23:59:59 da data indicada.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!selectedGrantee) {
+                      alert('Por favor, selecione o utilizador beneficiário.');
+                      return;
+                    }
+                    try {
+                      const raw = localStorage.getItem('gestao_processos_autorizacoes_partilhadas') || '[]';
+                      const list = JSON.parse(raw);
+                      
+                      // Check if already exists active
+                      const exists = list.some((item: any) => 
+                        item.processoNumero === processo.numero && 
+                        item.grantedTo.toLowerCase() === selectedGrantee.toLowerCase() &&
+                        isAuthorizationActive(item.createdAt, item.limiteData)
+                      );
+                      if (exists) {
+                        alert('Este utilizador já possui uma autorização ativa para este processo. Revogue a existente primeiro.');
+                        return;
+                      }
+
+                      const targetUserObj = getUsers().find((u: any) => u.username === selectedGrantee);
+                      const targetRole = targetUserObj ? targetUserObj.role : currentUser?.role || 'juiz';
+
+                      const newAuth = {
+                        id: generateId(),
+                        processoNumero: processo.numero,
+                        grantedBy: currentUser?.username || 'desconhecido',
+                        grantedTo: selectedGrantee,
+                        role: targetRole,
+                        perm: selectedGranteePerm,
+                        limiteData: selectedGranteeLimiteData || null,
+                        createdAt: new Date().toISOString()
+                      };
+
+                      list.push(newAuth);
+                      localStorage.setItem('gestao_processos_autorizacoes_partilhadas', JSON.stringify(list));
+                      
+                      if (currentUser) {
+                        logAction(
+                          currentUser.username,
+                          'Autorização concedida',
+                          processo.numero,
+                          `Autorização de ${selectedGranteePerm === 'todos' ? 'leitura e escrita (todos os atos)' : 'apenas consulta'} concedida ao utilizador ${selectedGrantee} até ${selectedGranteeLimiteData || '48h (omissão)'}.`
+                        );
+                      }
+
+                      alert('Autorização concedida com sucesso!');
+                      setSelectedGrantee('');
+                      setSelectedGranteeLimiteData('');
+                      handleRefreshSharedAuths();
+                    } catch (e) {
+                      console.error(e);
+                      alert('Erro ao guardar autorização.');
+                    }
+                  }}
+                  className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs cursor-pointer transition-all"
+                >
+                  Conceder Autorização
+                </button>
+              </div>
+
+              {/* Grid List Col */}
+              <div className="lg:col-span-2 space-y-4">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  Autorizações Ativas para este Processo
+                </h4>
+
+                {sharedAuthsList.length === 0 ? (
+                  <div className="text-center py-10 bg-slate-50 border border-slate-200 rounded-xl">
+                    <span className="text-xl block mb-2">🔒</span>
+                    <p className="text-xs text-slate-400 italic">Não existem autorizações partilhadas ativas para este processo.</p>
+                  </div>
+                ) : (
+                  <div className="border border-slate-205 rounded-xl overflow-hidden bg-white shadow-xs">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 select-none">
+                          <th className="p-3 font-semibold">Beneficiário</th>
+                          <th className="p-3 font-semibold">Categoria</th>
+                          <th className="p-3 font-semibold">Concedido por</th>
+                          <th className="p-3 font-semibold">Nível</th>
+                          <th className="p-3 font-semibold">Validade / Estado</th>
+                          <th className="p-3 font-semibold text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-medium">
+                        {sharedAuthsList.map((auth: any) => {
+                          const active = isAuthorizationActive(auth.createdAt, auth.limiteData);
+                          return (
+                            <tr key={auth.id} className={`hover:bg-slate-50/50 ${!active ? 'opacity-50 line-through bg-slate-50/30' : ''}`}>
+                              <td className="p-3">
+                                <span className="font-semibold text-slate-850 block">{auth.grantedTo}</span>
+                                {!active && <span className="text-[9px] font-bold text-rose-500 uppercase block leading-none mt-0.5">Expirada</span>}
+                              </td>
+                              <td className="p-3">
+                                <span className="capitalize px-2 py-0.5 bg-slate-100 text-slate-700 rounded text-[10px] font-bold">
+                                  {auth.role === 'juiz' ? 'Magistrado' : auth.role === 'procurador' ? 'Procurador' : 'Funcionário'}
+                                </span>
+                              </td>
+                              <td className="p-3 text-slate-500 font-mono text-[10.5px]">{auth.grantedBy}</td>
+                              <td className="p-3">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  auth.perm === 'todos' 
+                                    ? 'bg-emerald-50 text-emerald-750 border border-emerald-100' 
+                                    : 'bg-indigo-50 text-indigo-755 border border-indigo-100'
+                                }`}>
+                                  {auth.perm === 'todos' ? '✍️ Todos os Atos' : '👁️ Consulta'}
+                                </span>
+                              </td>
+                              <td className="p-3 text-slate-600 font-mono text-[10.5px]">
+                                {auth.limiteData ? (
+                                  <span>Até {auth.limiteData} às 23:59</span>
+                                ) : (
+                                  <span>Até {new Date(new Date(auth.createdAt).getTime() + 48*60*60*1000).toLocaleString('pt-PT', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})} (48h)</span>
+                                )}
+                              </td>
+                              <td className="p-3 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (window.confirm(`Deseja realmente revogar a autorização para ${auth.grantedTo}?`)) {
+                                      try {
+                                        const raw = localStorage.getItem('gestao_processos_autorizacoes_partilhadas') || '[]';
+                                        const list = JSON.parse(raw);
+                                        const updated = list.filter((item: any) => item.id !== auth.id);
+                                        localStorage.setItem('gestao_processos_autorizacoes_partilhadas', JSON.stringify(updated));
+                                        
+                                        if (currentUser) {
+                                          logAction(
+                                            currentUser.username,
+                                            'Autorização revogada',
+                                            processo.numero,
+                                            `Autorização de acesso para ${auth.grantedTo} foi revogada.`
+                                          );
+                                        }
+
+                                        alert('Autorização revogada com sucesso.');
+                                        handleRefreshSharedAuths();
+                                      } catch (e) {
+                                        console.error(e);
+                                      }
+                                    }
+                                  }}
+                                  className="text-red-600 hover:text-red-800 hover:bg-red-50 px-2 py-1 rounded transition-colors font-bold cursor-pointer"
+                                >
+                                  Revogar
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       </>
     );
   };
+
+  if (currentUser && currentUser.role !== 'administrador' && !isUserAssociatedWithProcess(currentUser, processo)) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 bg-white border border-rose-100 rounded-2xl shadow-sm text-center max-w-lg mx-auto my-12 animate-in fade-in duration-200">
+        <span className="text-4xl block mb-4">🚫</span>
+        <h2 className="text-lg font-bold text-rose-800 font-sans">Acesso Restrito / Não Associado</h2>
+        <p className="text-xs text-slate-500 mt-2 leading-relaxed font-medium">
+          De acordo com as regras de confidencialidade judicial, o seu utilizador apenas tem permissão para consultar os processos judiciais aos quais está ativamente associado como Magistrado, Procurador, Funcionário de Secretaria ou Advogado.
+        </p>
+        <button
+          onClick={onBack}
+          className="mt-6 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs transition-colors cursor-pointer"
+        >
+          Voltar para a Listagem
+        </button>
+      </div>
+    );
+  }
 
   return (
     <>

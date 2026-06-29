@@ -71,6 +71,8 @@ import {
   initLocalStorageSeed, 
   getUsers, 
   saveUser, 
+  deleteUser,
+  toggleUserActive,
   getProcessos, 
   createProcesso, 
   updateProcesso,
@@ -105,7 +107,17 @@ import {
   deleteNotificacao,
   generateId,
   getDocumentClassifications,
-  saveDocumentClassifications
+  saveDocumentClassifications,
+  isUserAssociatedWithProcess,
+  isUserNativelyAssociatedWithProcess,
+  isUserAuthorizedForProcess,
+  isAuthorizationActive,
+  getUserPermissionForProcess,
+  seedFictitiousData,
+  getAdminAuthorizations,
+  saveAdminAuthorization,
+  deleteAdminAuthorization,
+  type AdminAuth
 } from './utils/storage';
 
 import LoginScreen from './components/LoginScreen';
@@ -315,6 +327,9 @@ export default function App() {
   // Session states
   const [currentUser, setCurrentUser] = useState<ActiveUserType | null>(null);
   const [processosList, setProcessosList] = useState<Processo[]>([]);
+  const myProcessos = currentUser?.role === 'administrador'
+    ? processosList
+    : processosList.filter(p => isUserAssociatedWithProcess(currentUser, p));
   const [activeTab, setActiveTab] = useState<'inicial' | 'pesquisa' | 'registo' | 'disco' | 'utilizadores' | 'agentes' | 'autoteste' | 'manual'>('inicial');
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [secretariaSelectedTribunalId, setSecretariaSelectedTribunalId] = useState('');
@@ -441,6 +456,14 @@ export default function App() {
   const [secretariaDraftText, setSecretariaDraftText] = useState('');
   const [secretariaTemplateId, setSecretariaTemplateId] = useState('');
   const [adminUserFilter, setAdminUserFilter] = useState('');
+  // Admin Authorizations panel state
+  const [expandedUserAuthPanel, setExpandedUserAuthPanel] = useState<string | null>(null);
+  const [authType, setAuthType] = useState<'permanente' | 'temporaria'>('permanente');
+  const [authExpiraEm, setAuthExpiraEm] = useState('');
+  const [authScope, setAuthScope] = useState<'todos' | 'uns' | 'alguns'>('todos');
+  const [authSelectedProcessos, setAuthSelectedProcessos] = useState<string[]>([]);
+  const [authPerm, setAuthPerm] = useState<'consulta' | 'todos'>('consulta');
+  const [adminAuthsList, setAdminAuthsList] = useState<AdminAuth[]>([]);
   const [secretariaSelectedRecipient, setSecretariaSelectedRecipient] = useState('');
   const [secretariaSuccessMsg, setSecretariaSuccessMsg] = useState('');
   const [secSearch, setSecSearch] = useState('');
@@ -569,6 +592,14 @@ export default function App() {
   const [newFormModeloNome, setNewFormModeloNome] = useState('');
   const [newFormModeloTexto, setNewFormModeloTexto] = useState('');
   const [newFormModeloTribunalId, setNewFormModeloTribunalId] = useState('');
+
+  // Bulk professional replacement states
+  const [bulkType, setBulkType] = useState<'juiz' | 'procurador' | 'funcionario'>('juiz');
+  const [bulkOriginal, setBulkOriginal] = useState('');
+  const [bulkTarget, setBulkTarget] = useState('');
+  const [bulkSelectedNums, setBulkSelectedNums] = useState<string[]>([]);
+  const [bulkSuccessMessage, setBulkSuccessMessage] = useState('');
+  const [bulkErrorMessage, setBulkErrorMessage] = useState('');
 
   // Multi-criteria Search Filter States
   const [filterNumero, setFilterNumero] = useState('');
@@ -760,12 +791,97 @@ export default function App() {
     }
   };
 
+  const getAssociatedProcesses = (nome: string, role: 'juiz' | 'procurador' | 'funcionario' | 'advogado') => {
+    const isNameMatching = (nameA: string, nameB: string): boolean => {
+      if (!nameA || !nameB) return false;
+      const clean = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      const ca = clean(nameA);
+      const cb = clean(nameB);
+      if (ca === cb || ca.includes(cb) || cb.includes(ca)) return true;
+      const partsA = ca.split(/[._\s-]+/).filter(part => part.length >= 2);
+      if (partsA.length > 0 && partsA.every(part => cb.includes(part))) return true;
+      const partsB = cb.split(/[._\s-]+/).filter(part => part.length >= 2);
+      if (partsB.length > 0 && partsB.every(part => ca.includes(part))) return true;
+      return false;
+    };
+
+    return processosList.filter(p => !p.deleted).filter(p => {
+      if (role === 'juiz') {
+        return p.juizTitular && isNameMatching(nome, p.juizTitular);
+      }
+      if (role === 'procurador') {
+        return p.procuradores && p.procuradores.some(pr => isNameMatching(nome, pr));
+      }
+      if (role === 'funcionario') {
+        return p.funcionarios && p.funcionarios.some(f => isNameMatching(nome, f));
+      }
+      if (role === 'advogado') {
+        const inAutor = p.advogadosAutor && p.advogadosAutor.some(a => isNameMatching(nome, a));
+        const inReu = p.advogadosReu && p.advogadosReu.some(a => isNameMatching(nome, a));
+        return inAutor || inReu;
+      }
+      return false;
+    });
+  };
+
   const handleDeleteJuiz = (nome: string) => {
+    const associated = getAssociatedProcesses(nome, 'juiz');
+    if (associated.length > 0) {
+      alert(`Não é possível remover definitivamente o juiz "${nome}" porque está associado a processos ativos:\n\n` + 
+            associated.map(p => `• Processo ${p.numero}`).join('\n') + 
+            `\n\nPor favor, retire ou substitua este juiz nos processos indicados antes de o remover.`);
+      return;
+    }
+
     if (window.confirm(`Tem a certeza que deseja remover o juiz "${nome}" do sistema local?`)) {
       const updated = deleteJuiz(nome);
       setJuizes(updated);
       setJuizSuccess('Juiz removido com sucesso.');
     }
+  };
+
+  const handleExecuteBulkTransfer = () => {
+    setBulkErrorMessage('');
+    setBulkSuccessMessage('');
+
+    if (!bulkOriginal) {
+      setBulkErrorMessage('Por favor, selecione o profissional original.');
+      return;
+    }
+    if (!bulkTarget) {
+      setBulkErrorMessage('Por favor, selecione o profissional de destino.');
+      return;
+    }
+    if (bulkOriginal === bulkTarget) {
+      setBulkErrorMessage('O profissional de destino não pode ser o mesmo que o original.');
+      return;
+    }
+    if (bulkSelectedNums.length === 0) {
+      setBulkErrorMessage('Nenhum processo foi selecionado para transferência.');
+      return;
+    }
+
+    const updated = processosList.map(p => {
+      if (bulkSelectedNums.includes(p.numero)) {
+        if (bulkType === 'juiz') {
+          return { ...p, juizTitular: bulkTarget };
+        } else if (bulkType === 'procurador') {
+          const procs = p.procuradores || [];
+          const updatedProcs = procs.map(pr => pr === bulkOriginal ? bulkTarget : pr);
+          return { ...p, procuradores: updatedProcs };
+        } else if (bulkType === 'funcionario') {
+          const funcs = p.funcionarios || [];
+          const updatedFuncs = funcs.map(f => f === bulkOriginal ? bulkTarget : f);
+          return { ...p, funcionarios: updatedFuncs };
+        }
+      }
+      return p;
+    });
+
+    setProcessosList(updated);
+    localStorage.setItem('gestao_processos_processos', JSON.stringify(updated));
+    setBulkSuccessMessage(`Transferência em bloco efetuada com sucesso para ${bulkSelectedNums.length} processo(s).`);
+    setBulkSelectedNums([]);
   };
 
   const handleCreateAdvogado = (e: React.FormEvent) => {
@@ -799,6 +915,14 @@ export default function App() {
   };
 
   const handleDeleteAdvogado = (nome: string) => {
+    const associated = getAssociatedProcesses(nome, 'advogado');
+    if (associated.length > 0) {
+      alert(`Não é possível remover definitivamente o advogado "${nome}" porque está associado a processos ativos:\n\n` + 
+            associated.map(p => `• Processo ${p.numero}`).join('\n') + 
+            `\n\nPor favor, retire ou substitua este advogado nos processos indicados antes de o remover.`);
+      return;
+    }
+
     if (window.confirm(`Tem a certeza que deseja remover o advogado "${nome}" do sistema local?`)) {
       const updated = deleteAdvogado(nome);
       setAdvogados(updated);
@@ -821,6 +945,14 @@ export default function App() {
   };
 
   const handleDeleteProcurador = (nome: string) => {
+    const associated = getAssociatedProcesses(nome, 'procurador');
+    if (associated.length > 0) {
+      alert(`Não é possível remover definitivamente o procurador "${nome}" porque está associado a processos ativos:\n\n` + 
+            associated.map(p => `• Processo ${p.numero}`).join('\n') + 
+            `\n\nPor favor, retire ou substitua este procurador nos processos indicados antes de o remover.`);
+      return;
+    }
+
     if (window.confirm(`Tem a certeza que deseja remover o procurador "${nome}" do sistema local?`)) {
       const updated = deleteProcurador(nome);
       setGlobalProcuradores(updated);
@@ -1285,6 +1417,14 @@ export default function App() {
   };
 
   const handleDeleteFuncionario = (nome: string) => {
+    const associated = getAssociatedProcesses(nome, 'funcionario');
+    if (associated.length > 0) {
+      alert(`Não é possível remover definitivamente o funcionário "${nome}" porque está associado a processos ativos:\n\n` + 
+            associated.map(p => `• Processo ${p.numero}`).join('\n') + 
+            `\n\nPor favor, retire ou substitua este funcionário nos processos indicados antes de o remover.`);
+      return;
+    }
+
     if (window.confirm(`Tem a certeza que deseja remover o funcionário "${nome}" do sistema local?`)) {
       const updated = deleteFuncionario(nome);
       setFuncionarios(updated);
@@ -1967,6 +2107,19 @@ export default function App() {
     }, 1500);
   };
 
+  const handleSeedDemoData = () => {
+    if (window.confirm("Pretende semear os 4 processos de teste fictícios para o ambiente de desenvolvimento? Isto adicionará juízes, procuradores, funcionários, advogados e partes fictícias à base de dados.")) {
+      const res = seedFictitiousData();
+      setProcessosList(res.processos);
+      setJuizes(getJuizes());
+      setAdvogados(getAdvogados());
+      setGlobalProcuradores(getProcuradores());
+      setFuncionarios(getFuncionarios());
+      setAllUsers(getUsers());
+      window.alert(res.message);
+    }
+  };
+
   const handleDbVacuum = () => {
     setIsDbVacuuming(true);
     setDbVacuumResult('');
@@ -2342,10 +2495,15 @@ export default function App() {
     setProcessosList(getProcessos());
   };
 
-  // Delete whole Process (Admin Only)
+  // Delete whole Process (Admin Only) - Soft Delete to allow archiving/restoration
   const handleDeleteProcesso = (numero: string) => {
     const list = getProcessos();
-    const updated = list.filter(p => p.numero !== numero);
+    const updated = list.map(p => {
+      if (p.numero === numero) {
+        return { ...p, deleted: true, deletedAt: new Date().toISOString() };
+      }
+      return p;
+    });
     localStorage.setItem('gestao_processos_processos', JSON.stringify(updated));
     setProcessosList(updated);
     setSelectedProcessoNum(null);
@@ -2383,6 +2541,112 @@ export default function App() {
     setAllUsers(getUsers());
     setNewUsername('');
     setNewPassword('');
+  };
+
+  const handleDeleteUser = (usernameToDelete: string) => {
+    if (!currentUser || currentUser.role !== 'administrador') return;
+    
+    if (currentUser.username.toLowerCase() === usernameToDelete.toLowerCase()) {
+      alert('Por razões de segurança, não pode eliminar a sua própria conta de administrador em sessão.');
+      return;
+    }
+
+    const list = getUsers();
+    const isLastAdmin = list.filter(u => u.role === 'administrador').length <= 1 && 
+                        list.find(u => u.username.toLowerCase() === usernameToDelete.toLowerCase())?.role === 'administrador';
+
+    if (isLastAdmin) {
+      alert('Não é possível eliminar este utilizador porque é o único administrador do sistema. Deve existir pelo menos uma conta de administrador ativa.');
+      return;
+    }
+
+    if (window.confirm(`Tem a certeza absoluta de que deseja eliminar definitivamente o utilizador "${usernameToDelete}"? Esta operação é irreversível.`)) {
+      const updated = deleteUser(usernameToDelete);
+      setAllUsers(updated);
+    }
+  };
+
+  const handleToggleUserActive = (usernameToToggle: string) => {
+    if (!currentUser || currentUser.role !== 'administrador') return;
+
+    if (currentUser.username.toLowerCase() === usernameToToggle.toLowerCase()) {
+      alert('Não pode desativar a sua própria conta de administrador em sessão.');
+      return;
+    }
+
+    const list = getUsers();
+    const targetUser = list.find(u => u.username.toLowerCase() === usernameToToggle.toLowerCase());
+    const isTargetActive = targetUser?.active !== false; // Active unless explicitly false
+
+    if (isTargetActive) {
+      const isLastAdmin = list.filter(u => u.role === 'administrador' && u.active !== false).length <= 1 && 
+                          targetUser?.role === 'administrador';
+
+      if (isLastAdmin) {
+        alert('Não é possível desativar este utilizador porque é o único administrador ativo do sistema.');
+        return;
+      }
+    }
+
+    const updated = toggleUserActive(usernameToToggle);
+    setAllUsers(updated);
+  };
+
+  const handleOpenUserAuthPanel = (username: string) => {
+    if (expandedUserAuthPanel === username) {
+      setExpandedUserAuthPanel(null);
+    } else {
+      setExpandedUserAuthPanel(username);
+      // Reset form states
+      setAuthType('permanente');
+      setAuthExpiraEm('');
+      setAuthScope('todos');
+      setAuthSelectedProcessos([]);
+      setAuthPerm('consulta');
+      // Load authorizations
+      const allAuths = getAdminAuthorizations();
+      setAdminAuthsList(allAuths.filter(a => a.userId.toLowerCase().trim() === username.toLowerCase().trim()));
+    }
+  };
+
+  const handleGrantAdminAuth = (username: string) => {
+    if ((authScope === 'uns' || authScope === 'alguns') && authSelectedProcessos.length === 0) {
+      alert('Por favor, selecione pelo menos um processo.');
+      return;
+    }
+
+    const newAuth: AdminAuth = {
+      id: generateId ? generateId() : Math.random().toString(36).substring(2, 9),
+      userId: username,
+      tipo: authExpiraEm ? 'temporaria' : 'permanente',
+      expiraEm: authExpiraEm || undefined,
+      scope: authScope,
+      processoNumeros: (authScope === 'uns' || authScope === 'alguns') ? authSelectedProcessos : undefined,
+      perm: authPerm,
+      createdAt: new Date().toISOString()
+    };
+
+    saveAdminAuthorization(newAuth);
+    
+    // Refresh list
+    const allAuths = getAdminAuthorizations();
+    setAdminAuthsList(allAuths.filter(a => a.userId.toLowerCase().trim() === username.toLowerCase().trim()));
+    
+    // Reset form
+    setAuthSelectedProcessos([]);
+    setAuthExpiraEm('');
+    
+    alert('Autorização de acesso concedida com sucesso pelo Administrador.');
+  };
+
+  const handleRevokeAdminAuth = (authId: string, username: string) => {
+    if (confirm('Deseja realmente revogar esta autorização de acesso especial?')) {
+      deleteAdminAuthorization(authId);
+      
+      // Refresh list
+      const allAuths = getAdminAuthorizations();
+      setAdminAuthsList(allAuths.filter(a => a.userId.toLowerCase().trim() === username.toLowerCase().trim()));
+    }
   };
 
   // --- TRIBUNAIS ADMINISTRATIVE ACTIONS ---
@@ -2455,7 +2719,12 @@ export default function App() {
       return false;
     };
 
-    return processosList.filter(p => !p.deleted && !p.parentProcessoNumero).filter(p => {
+    const list = processosList.filter(p => !p.deleted && !p.parentProcessoNumero).filter(p => {
+      // Restrição de acesso: utilizador comum (juiz, procurador, funcionário, advogado) só vê os seus processos
+      if (currentUser && currentUser.role !== 'administrador') {
+        if (!isUserAssociatedWithProcess(currentUser, p)) return false;
+      }
+
       if (filterNumero && !p.numero.toLowerCase().includes(filterNumero.toLowerCase())) return false;
       if (filterJuiz && !normalizeText(p.juizTitular).includes(normalizeText(filterJuiz))) return false;
       if (filterData && p.dataAutuacao !== filterData) return false;
@@ -2480,6 +2749,18 @@ export default function App() {
       
       return true;
     });
+
+    if (currentUser && currentUser.role !== 'administrador') {
+      return [...list].sort((a, b) => {
+        const isAuthA = isUserAuthorizedForProcess(currentUser, a);
+        const isAuthB = isUserAuthorizedForProcess(currentUser, b);
+        if (isAuthA && !isAuthB) return -1;
+        if (!isAuthA && isAuthB) return 1;
+        return 0;
+      });
+    }
+
+    return list;
   })();
 
   const clearFilters = () => {
@@ -2492,6 +2773,110 @@ export default function App() {
     setFilterFuncionario('');
     setFilterApenasAlarmados(false);
     setFilterApenasExpirados(false);
+  };
+
+  const renderProcessRow = (p: Processo) => {
+    const isAlarmed = isProcessoAlarmado(p);
+    const isAuthorized = isUserAuthorizedForProcess(currentUser, p);
+    return (
+      <div 
+        key={p.numero}
+        className={`px-6 py-5 border-b border-slate-50 last:border-b-0 transition-colors text-xs flex flex-col md:flex-row md:items-center justify-between gap-4 ${
+          isAlarmed 
+            ? 'bg-amber-50/70 border-l-4 border-l-amber-500 shadow-3xs' 
+            : 'hover:bg-slate-50/50'
+        }`}
+      >
+        <div className="space-y-2 min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => handleOpenProcessoInNewTab(p.numero)}
+              className={`text-[15px] font-bold font-mono hover:underline cursor-pointer transition-colors ${
+                isAlarmed 
+                  ? 'text-red-800 bg-red-100/90 px-2 py-0.5 rounded border border-red-200 font-bold' 
+                  : 'text-slate-900 hover:text-blue-600'
+              }`}
+            >
+              {p.numero} {isAlarmed ? '⏰⚠️' : ''}
+            </button>
+            {isAuthorized && (
+              <span className="text-[10px] bg-amber-500 text-white border border-amber-600 px-2 py-0.5 rounded font-extrabold flex items-center gap-1 shadow-2xs select-none">
+                🔓 Acesso Autorizado (Por Autorização)
+              </span>
+            )}
+            {!isAuthorized && currentUser?.role !== 'administrador' && (
+              <span className="text-[10px] bg-indigo-600 text-white border border-indigo-700 px-2 py-0.5 rounded font-extrabold flex items-center gap-1 shadow-2xs select-none">
+                💼 Processo de que é Titular
+              </span>
+            )}
+            <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded font-bold text-slate-500">
+              Autuação: {p.dataAutuacao}
+            </span>
+            <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-150 px-2 py-0.5 rounded font-medium">
+              📂 {p.documentos.filter(d => !d.deleted).length} docs
+            </span>
+            {p.tipo === 'civel' && p.valorAcao !== undefined && (
+              <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-250 px-2 py-0.5 rounded font-bold">
+                Valor: {p.valorAcao.toLocaleString('pt-PT', { style: 'currency', currency: 'EUR' })}
+              </span>
+            )}
+            {p.faseAtual && (
+              <span className="text-[10px] bg-purple-50 text-purple-700 border border-purple-150 px-2 py-0.5 rounded font-bold">
+                Fase: {p.faseAtual}
+              </span>
+            )}
+            {isAlarmed && (
+              <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded animate-bounce">
+                ALERTA ATIVO
+              </span>
+            )}
+          </div>
+
+          {/* Autores & Réus summary */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600 text-xs">
+            <div>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Membro Autor:</span>{' '}
+              <span className="font-semibold text-slate-700">{p.autores.join(', ')}</span>
+            </div>
+            <span className="text-slate-300">|</span>
+            <div>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Membro Réu:</span>{' '}
+              <span className="font-semibold text-slate-700">{p.reus.join(', ')}</span>
+            </div>
+          </div>
+
+          {/* Judge & Lawyers summary */}
+          <div className="text-[11px] text-slate-400">
+            Juiz: <strong className="text-slate-600">{p.juizTitular}</strong> • Advogados: <strong className="text-slate-500">{p.advogadosAutor.concat(p.advogadosReu).join(', ') || 'Nenhum'}</strong>
+          </div>
+        </div>
+
+        {/* Chevron Action with delete option */}
+        <div className="flex items-center gap-2 self-start md:self-center">
+          {currentUser?.role === 'administrador' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (window.confirm(`Tem a certeza que deseja eliminar o Processo ${p.numero}?`)) {
+                  handleDeleteProcesso(p.numero);
+                }
+              }}
+              className="p-2 border border-red-200 hover:border-red-400 bg-red-50 text-red-600 hover:bg-red-700 hover:text-white rounded-lg transition-all cursor-pointer shadow-3xs"
+              title="Eliminar Processo"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button
+            onClick={() => handleOpenProcessoInNewTab(p.numero)}
+            className="px-4 py-2 border border-slate-200 hover:border-slate-350 bg-white shadow-xs font-semibold rounded-lg text-xs text-slate-700 hover:text-slate-900 transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <span>Visualizar Processo</span>
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    );
   };
 
   // Route back out to Login if not logged in
@@ -2638,8 +3023,8 @@ export default function App() {
               }`}
             >
               <div className="flex items-center gap-3">
-                <BellRing className={`w-5 h-5 ${processosList.filter(p => !p.deleted && p.alarmeAtivo).length > 0 ? 'text-amber-500 animate-pulse' : 'opacity-70'}`} />
-                <span>Processos Alarmados ({processosList.filter(p => !p.deleted && p.alarmeAtivo).length})</span>
+                <BellRing className={`w-5 h-5 ${myProcessos.filter(p => !p.deleted && p.alarmeAtivo).length > 0 ? 'text-amber-500 animate-pulse' : 'opacity-70'}`} />
+                <span>Processos Alarmados ({myProcessos.filter(p => !p.deleted && p.alarmeAtivo).length})</span>
               </div>
               <ChevronRight className="w-4 h-4 opacity-40" />
             </div>
@@ -2898,8 +3283,13 @@ export default function App() {
 
                   {/* ALARMES ATIVOS E SILENCIADOS SECTION */}
                   {(() => {
+                    // Filter processes by association if not admin
+                    const userProcessos = currentUser?.role === 'administrador'
+                      ? processosList
+                      : processosList.filter(p => isUserAssociatedWithProcess(currentUser, p));
+
                     // Compute alarms for all non-deleted processes using getProcessoAlarmeInfo
-                    const preparedAlarms = processosList
+                    const preparedAlarms = userProcessos
                       .filter(p => !p.deleted)
                       .map(p => {
                         const info = getProcessoAlarmeInfo(p);
@@ -4329,6 +4719,19 @@ export default function App() {
                               )}
                             </div>
 
+                            {!(window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') && (
+                              <div className="pt-3 border-t border-slate-100">
+                                <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-2">Ambiente de Desenvolvimento</span>
+                                <button
+                                  type="button"
+                                  onClick={handleSeedDemoData}
+                                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-[10px] cursor-pointer inline-flex items-center justify-center gap-1.5 transition-all shadow-xs"
+                                >
+                                  🌱 Semear 4 Processos Fictícios (Moçambique)
+                                </button>
+                              </div>
+                            )}
+
                             <p className="text-[10px] text-slate-400 font-sans italic leading-relaxed pt-1.5 border-t border-slate-100">
                               ℹ️ <strong>Sugestão técnica de escalabilidade:</strong> Para ultrapassar as limitações de quota de 5MB do LocalStorage inerentes aos navegadores Web, recomenda-se em produção a migração do driver local para <strong>IndexedDB (Dexie.js)</strong> ou <strong>SQLite compilado em WebAssembly (SQLite-WASM CO-OPFS)</strong>. Isto garante suporte persistente assíncrono até Gigabit, permitindo guardar milhões de peças digitalizadas no próprio browser.
                             </p>
@@ -4462,87 +4865,82 @@ export default function App() {
 
                     <div className="divide-y divide-slate-100">
                       {filteredProcessos.length > 0 ? (
-                        filteredProcessos.map((p) => {
-                          const isAlarmed = isProcessoAlarmado(p);
-                          return (
-                            <div 
-                              key={p.numero}
-                              className={`px-6 py-5 border-b border-slate-50 last:border-b-0 transition-colors text-xs flex flex-col md:flex-row md:items-center justify-between gap-4 ${
-                                isAlarmed 
-                                  ? 'bg-amber-50/70 border-l-4 border-l-amber-500 shadow-3xs' 
-                                  : 'hover:bg-slate-50/50'
-                              }`}
-                            >
-                              <div className="space-y-2 min-w-0 flex-1">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <button
-                                    onClick={() => handleOpenProcessoInNewTab(p.numero)}
-                                    className={`text-[15px] font-bold font-mono hover:underline cursor-pointer transition-colors ${
-                                      isAlarmed 
-                                        ? 'text-red-800 bg-red-100/90 px-2 py-0.5 rounded border border-red-200 font-bold' 
-                                        : 'text-slate-900 hover:text-blue-600'
-                                    }`}
-                                  >
-                                    {p.numero} {isAlarmed ? '⏰⚠️' : ''}
-                                  </button>
-                                  <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded font-bold text-slate-500">
-                                    Autuação: {p.dataAutuacao}
-                                  </span>
-                                  <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-150 px-2 py-0.5 rounded font-medium">
-                                    📂 {p.documentos.filter(d => !d.deleted).length} docs
-                                  </span>
-                                  {p.tipo === 'civel' && p.valorAcao !== undefined && (
-                                    <span className="text-[10px] bg-emerald-50 text-emerald-700 border border-emerald-250 px-2 py-0.5 rounded font-bold">
-                                      Valor: {p.valorAcao.toLocaleString('pt-PT', { style: 'currency', currency: 'EUR' })}
-                                    </span>
-                                  )}
-                                  {p.faseAtual && (
-                                    <span className="text-[10px] bg-purple-50 text-purple-700 border border-purple-150 px-2 py-0.5 rounded font-bold">
-                                      Fase: {p.faseAtual}
-                                    </span>
-                                  )}
-                                  {isAlarmed && (
-                                    <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded animate-bounce">
-                                      ALERTA ATIVO
-                                    </span>
-                                  )}
-                                </div>
-
-                              {/* Autores & Réus summary */}
-                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-600 text-xs">
-                                <div>
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Membro Autor:</span>{' '}
-                                  <span className="font-semibold text-slate-700">{p.autores.join(', ')}</span>
-                                </div>
-                                <span className="text-slate-300">|</span>
-                                <div>
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Membro Réu:</span>{' '}
-                                  <span className="font-semibold text-slate-700">{p.reus.join(', ')}</span>
-                                </div>
+                        currentUser?.role === 'administrador' ? (
+                          filteredProcessos.map((p) => renderProcessRow(p))
+                        ) : (
+                          (() => {
+                            const authorized = filteredProcessos.filter(p => isUserAuthorizedForProcess(currentUser, p));
+                            const titular = filteredProcessos.filter(p => !isUserAuthorizedForProcess(currentUser, p));
+                            
+                            return (
+                              <div className="divide-y divide-slate-100 bg-[#FCFDFE]">
+                                {authorized.length > 0 && (
+                                  <div>
+                                    <div className="px-6 py-3 bg-amber-500/10 border-b border-slate-200/60 text-[11px] font-bold text-amber-800 flex items-center gap-1.5 uppercase tracking-wider select-none">
+                                      🔓 Processos de acesso autorizado ({authorized.length})
+                                    </div>
+                                    <div className="divide-y divide-slate-100 bg-white">
+                                      {authorized.map((p) => renderProcessRow(p))}
+                                    </div>
+                                  </div>
+                                )}
+                                {titular.length > 0 && (
+                                  <div>
+                                    <div className="px-6 py-3 bg-indigo-500/5 border-b border-slate-200/60 text-[11px] font-bold text-indigo-900 flex items-center gap-1.5 uppercase tracking-wider select-none">
+                                      💼 Processos de que é titular ({titular.length})
+                                    </div>
+                                    <div className="divide-y divide-slate-100 bg-white">
+                                      {titular.map((p) => renderProcessRow(p))}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
-
-                              {/* Judge & Lawyers summary */}
-                              <div className="text-[11px] text-slate-400">
-                                Juiz: <strong className="text-slate-600">{p.juizTitular}</strong> • Advogados: <strong className="text-slate-500">{p.advogadosAutor.concat(p.advogadosReu).join(', ') || 'Nenhum'}</strong>
-                              </div>
-                            </div>
-
-                            {/* Chevron Action */}
-                            <button
-                              onClick={() => handleOpenProcessoInNewTab(p.numero)}
-                              className="px-4 py-2 border border-slate-200 hover:border-slate-350 bg-white shadow-xs font-semibold rounded-lg text-xs text-slate-700 hover:text-slate-900 transition-colors cursor-pointer flex items-center gap-1.5 self-start md:self-center"
-                            >
-                              <span>Visualizar Processo</span>
-                              <ChevronRight className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        );
-                      })
+                            );
+                          })()
+                        )
                       ) : (
                         <div className="p-16 text-center text-slate-400">
                           <FolderSearch className="h-10 w-10 mx-auto stroke-[1.2] text-slate-300 mb-2" />
-                          <p className="text-sm font-bold text-slate-600">Nenhum processo corresponde aos critérios.</p>
-                          <p className="text-xs text-slate-400 mt-1">Limpe os filtros de pesquisa ou registe novos processos.</p>
+                          {(() => {
+                            const isNotAdmin = currentUser && currentUser.role !== 'administrador';
+                            const userHasNoAssociated = isNotAdmin && processosList.filter(p => !p.deleted && !p.parentProcessoNumero && isUserAssociatedWithProcess(currentUser, p)).length === 0;
+                            
+                            if (userHasNoAssociated) {
+                              return (
+                                <>
+                                  <p className="text-sm font-bold text-slate-600">Não está inserido em nenhum processo de momento.</p>
+                                  <p className="text-xs text-slate-400 mt-2 max-w-md mx-auto leading-relaxed">
+                                    De acordo com as regras de confidencialidade judicial, apenas pode aceder e ver listados os processos nos quais está inserido ou para os quais recebeu autorização expressa de consulta ou prática de atos.
+                                  </p>
+                                </>
+                              );
+                            } else if (isNotAdmin) {
+                              return (
+                                <>
+                                  <p className="text-sm font-bold text-slate-600">Nenhum processo corresponde aos critérios de pesquisa.</p>
+                                  <p className="text-xs text-slate-400 mt-1">Por favor, ajuste ou limpe os seus filtros de pesquisa.</p>
+                                </>
+                              );
+                            } else {
+                              // Admin
+                              const noProcessTotal = processosList.filter(p => !p.deleted && !p.parentProcessoNumero).length === 0;
+                              if (noProcessTotal) {
+                                return (
+                                  <>
+                                    <p className="text-sm font-bold text-slate-600">Não existem processos registados na base de dados.</p>
+                                    <p className="text-xs text-slate-400 mt-1">Crie um novo processo acedendo ao separador "Novo Registo".</p>
+                                  </>
+                                );
+                              } else {
+                                return (
+                                  <>
+                                    <p className="text-sm font-bold text-slate-600">Nenhum processo corresponde aos critérios de pesquisa.</p>
+                                    <p className="text-xs text-slate-400 mt-1">Limpe os filtros de pesquisa ou registe novos processos.</p>
+                                  </>
+                                );
+                              }
+                            }
+                          })()}
                         </div>
                       )}
                     </div>
@@ -6539,63 +6937,84 @@ export default function App() {
               {activeTab === 'utilizadores' && (
                 <div className="space-y-6">
                   {currentUser.role !== 'administrador' ? (
-                    <div className="max-w-xl bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6 animate-in fade-in duration-250">
-                      <div className="flex items-center gap-4 border-b border-slate-100 pb-5">
-                        <div className="h-12 w-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-700 font-extrabold text-lg select-none shadow-xs">
-                          {currentUser.username.substring(0, 2).toUpperCase()}
-                        </div>
-                        <div>
-                          <h2 className="text-base font-bold text-slate-905">Perfil de Utilizador</h2>
-                          <span className="text-[9px] text-indigo-700 bg-indigo-50 uppercase font-black px-2 py-0.5 rounded tracking-wider border border-indigo-150 mt-1 block w-fit">
-                            Acesso Consulta & Registo
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4 text-xs font-medium">
-                        <div className="grid grid-cols-2 gap-4 border-b border-slate-100 pb-4">
-                          <div>
-                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Nome de Utilizador</span>
-                            <span className="text-sm font-bold text-slate-800 font-mono">{currentUser.username}</span>
+                    <>
+                      <div className="max-w-xl bg-white border border-slate-200 rounded-3xl p-8 shadow-sm space-y-6 animate-in fade-in duration-250">
+                        <div className="flex items-center gap-4 border-b border-slate-100 pb-5">
+                          <div className="h-12 w-12 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-700 font-extrabold text-lg select-none shadow-xs">
+                            {currentUser.username.substring(0, 2).toUpperCase()}
                           </div>
                           <div>
-                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Perfil Local</span>
-                            <span className="text-xs font-bold text-slate-700 capitalize flex items-center gap-1">👤 Oficial de Justiça</span>
-                          </div>
-                        </div>
-
-                        <div className="border-b border-slate-100 pb-4">
-                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1.5">Aceder / Ver Palavra-Passe</span>
-                          <div className="flex items-center gap-2 bg-slate-50 border border-slate-205 rounded-xl px-3.5 py-1.8 w-fit min-w-[200px]">
-                            <span className="font-mono text-xs text-slate-705 font-bold tracking-widest">
-                              {visiblePasswords[currentUser.username] ? currentUser.password || '(Sem senha)' : '••••••••'}
+                            <h2 className="text-base font-bold text-slate-905">Perfil de Utilizador</h2>
+                            <span className="text-[9px] text-indigo-700 bg-indigo-50 uppercase font-black px-2 py-0.5 rounded tracking-wider border border-indigo-150 mt-1 block w-fit">
+                              Acesso Consulta & Registo
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => setVisiblePasswords(prev => ({ ...prev, [currentUser.username]: !prev[currentUser.username] }))}
-                              className="text-slate-450 hover:text-indigo-600 focus:outline-hidden transition-colors ml-auto cursor-pointer"
-                              title={visiblePasswords[currentUser.username] ? "Ocultar palavra-passe" : "Mostrar palavra-passe"}
-                            >
-                              {visiblePasswords[currentUser.username] ? (
-                                <EyeOff className="h-3.5 w-3.5" />
-                              ) : (
-                                <Eye className="h-3.5 w-3.5" />
-                              )}
-                            </button>
                           </div>
                         </div>
 
-                        <div>
-                          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Tribunal e Seção Associada</span>
-                          <span className="text-xs text-slate-705 font-bold mt-1 block">
-                            {(() => {
-                              const court = tribunaisList.find(c => c.id === currentUser.tribunalId);
-                              return court ? `🏛️ ${court.tribunal} (${court.localidade})` : 'Sem Comarca Associada / Secção Geral';
-                            })()}
-                          </span>
+                        <div className="space-y-4 text-xs font-medium">
+                          <div className="grid grid-cols-2 gap-4 border-b border-slate-100 pb-4">
+                            <div>
+                              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Nome de Utilizador</span>
+                              <span className="text-sm font-bold text-slate-800 font-mono">{currentUser.username}</span>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Perfil Local</span>
+                              <span className="text-xs font-bold text-slate-700 capitalize flex items-center gap-1">👤 Oficial de Justiça</span>
+                            </div>
+                          </div>
+
+                          <div className="border-b border-slate-100 pb-4">
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1.5">Aceder / Ver Palavra-Passe</span>
+                            <div className="flex items-center gap-2 bg-slate-50 border border-slate-205 rounded-xl px-3.5 py-1.8 w-fit min-w-[200px]">
+                              <span className="font-mono text-xs text-slate-705 font-bold tracking-widest">
+                                {visiblePasswords[currentUser.username] ? currentUser.password || '(Sem senha)' : '••••••••'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setVisiblePasswords(prev => ({ ...prev, [currentUser.username]: !prev[currentUser.username] }))}
+                                className="text-slate-450 hover:text-indigo-600 focus:outline-hidden transition-colors ml-auto cursor-pointer"
+                                title={visiblePasswords[currentUser.username] ? "Ocultar palavra-passe" : "Mostrar palavra-passe"}
+                              >
+                                {visiblePasswords[currentUser.username] ? (
+                                  <EyeOff className="h-3.5 w-3.5" />
+                                ) : (
+                                  <Eye className="h-3.5 w-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mb-1">Tribunal e Seção Associada</span>
+                            <span className="text-xs text-slate-705 font-bold mt-1 block">
+                              {(() => {
+                                const court = tribunaisList.find(c => c.id === currentUser.tribunalId);
+                                return court ? `🏛️ ${court.tribunal} (${court.localidade})` : 'Sem Comarca Associada / Secção Geral';
+                              })()}
+                            </span>
+                          </div>
                         </div>
                       </div>
-                    </div>
+                      
+                      {currentUser.role === 'juiz' && (
+                        <div className="mt-8 space-y-4 animate-in fade-in duration-300">
+                          <div className="border-t border-slate-200 pt-6">
+                            <h3 className="text-base font-bold text-slate-850 uppercase tracking-wider flex items-center gap-2 mb-2">
+                              🛡️ Consultas de Auditoria de Processos Associados
+                            </h3>
+                            <p className="text-xs text-slate-500 mb-4">
+                              Como Juiz de Direito, possui poderes acrescidos para auditar de forma rastreável todos os registos e acessos aos processos a que está associado.
+                            </p>
+                          </div>
+                          <AdminAuditPanel 
+                            restrictToProcesses={processosList
+                              .filter(p => isUserAssociatedWithProcess(currentUser, p))
+                              .map(p => p.numero)
+                            } 
+                          />
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <>
                       <div>
@@ -6801,48 +7220,250 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="divide-y divide-slate-100 max-h-[30rem] overflow-y-auto w-full">
+                        <div className="divide-y divide-slate-100 max-h-[30rem] overflow-y-auto w-full pr-1">
                           {[...allUsers]
                             .filter(u => u.username.toLowerCase().includes(adminUserFilter.toLowerCase()))
                             .sort((a, b) => a.username.localeCompare(b.username))
                             .map((user) => {
                               const court = tribunaisList.find(c => c.id === user.tribunalId);
                               return (
-                                <div key={user.username} className="py-3 flex justify-between items-center text-xs">
-                                  <div className="space-y-0.5">
-                                    <span className="font-semibold text-slate-800 block">{user.username}</span>
-                                    <div className="flex flex-col gap-0.5">
-                                      <span className="text-[10px] text-slate-400 font-mono">Dispositivo local • Criado em: {user.createdAt ? user.createdAt.split('T')[0] : 'Instalação'}</span>
-                                      <span className="text-[9px] text-blue-600 font-semibold">{court ? `🏛️ ${court.tribunal}` : 'Sem Tribunal Associado'}</span>
-                                      
-                                      <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-500 bg-slate-50 border border-slate-100 rounded px-2 py-0.5 w-fit">
-                                        <span className="font-mono">Pass:</span>
-                                        <span className="font-mono text-slate-705 font-bold">
-                                          {visiblePasswords[user.username] ? user.password || '(Sem senha)' : '••••••••'}
-                                        </span>
+                                <div key={user.username} className="py-4 space-y-3">
+                                  <div className="flex justify-between items-start text-xs">
+                                    <div className="space-y-0.5">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-semibold text-slate-800 block text-sm">{user.username}</span>
+                                        {user.active === false && (
+                                          <span className="px-1.5 py-0.2 text-[9px] font-bold text-red-700 bg-red-50 border border-red-150 rounded uppercase tracking-wider">
+                                            Inativo
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex flex-col gap-1">
+                                        <span className="text-[10px] text-slate-400 font-mono">Dispositivo local • Criado em: {user.createdAt ? user.createdAt.split('T')[0] : 'Instalação'}</span>
+                                        <span className="text-[9px] text-blue-600 font-semibold">{court ? `🏛️ ${court.tribunal}` : 'Sem Tribunal Associado'}</span>
+                                        
+                                        <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-slate-500 bg-slate-50 border border-slate-100 rounded px-2 py-0.5 w-fit">
+                                          <span className="font-mono">Pass:</span>
+                                          <span className="font-mono text-slate-705 font-bold">
+                                            {visiblePasswords[user.username] ? user.password || '(Sem senha)' : '••••••••'}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() => setVisiblePasswords(prev => ({ ...prev, [user.username]: !prev[user.username] }))}
+                                            className="text-slate-450 hover:text-slate-700 focus:outline-hidden transition-colors cursor-pointer"
+                                            title={visiblePasswords[user.username] ? "Ocultar palavra-passe" : "Mostrar palavra-passe"}
+                                          >
+                                            {visiblePasswords[user.username] ? (
+                                              <EyeOff className="h-3 w-3" />
+                                            ) : (
+                                              <Eye className="h-3 w-3" />
+                                            )}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      {user.role !== 'administrador' && (
                                         <button
                                           type="button"
-                                          onClick={() => setVisiblePasswords(prev => ({ ...prev, [user.username]: !prev[user.username] }))}
-                                          className="text-slate-450 hover:text-slate-700 focus:outline-hidden transition-colors cursor-pointer"
-                                          title={visiblePasswords[user.username] ? "Ocultar palavra-passe" : "Mostrar palavra-passe"}
+                                          onClick={() => handleOpenUserAuthPanel(user.username)}
+                                          className={`px-2.5 py-1.2 text-[10px] font-bold rounded-lg transition-all flex items-center gap-1 cursor-pointer ${
+                                            expandedUserAuthPanel === user.username
+                                              ? 'bg-blue-650 text-white shadow-xs'
+                                              : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-150'
+                                          }`}
                                         >
-                                          {visiblePasswords[user.username] ? (
-                                            <EyeOff className="h-3 w-3" />
-                                          ) : (
-                                            <Eye className="h-3 w-3" />
-                                          )}
+                                          🔑 Autorizações
                                         </button>
-                                      </div>
+                                      )}
 
+                                      {/* Active/Inactive Toggle Button */}
+                                      {currentUser?.username.toLowerCase() !== user.username.toLowerCase() && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleToggleUserActive(user.username)}
+                                          className={`px-2.5 py-1.2 text-[10px] font-bold rounded-lg transition-all border cursor-pointer ${
+                                            user.active === false
+                                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 animate-pulse'
+                                              : 'bg-amber-50 text-amber-705 border-amber-200 hover:bg-amber-100'
+                                          }`}
+                                          title={user.active === false ? "Ativar utilizador" : "Desativar utilizador (Inativar)"}
+                                        >
+                                          {user.active === false ? '🔓 Ativar' : '🔒 Inativar'}
+                                        </button>
+                                      )}
+
+                                      {/* Delete User Button */}
+                                      {currentUser?.username.toLowerCase() !== user.username.toLowerCase() && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteUser(user.username)}
+                                          className="p-1.5 text-red-600 hover:text-white hover:bg-red-650 border border-red-150 rounded-lg cursor-pointer transition-colors"
+                                          title="Eliminar utilizador definitivamente"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      )}
+
+                                      <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
+                                        user.role === 'administrador'
+                                          ? 'bg-slate-100 text-slate-705 border border-slate-200'
+                                          : 'bg-blue-50 text-blue-700 border border-blue-150'
+                                      }`}>
+                                        {user.role}
+                                      </span>
                                     </div>
                                   </div>
-                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                                    user.role === 'administrador'
-                                      ? 'bg-slate-100 text-slate-705 border border-slate-200'
-                                      : 'bg-blue-50 text-blue-700 border border-blue-150'
-                                  }`}>
-                                    {user.role}
-                                  </span>
+
+                                  {/* Expanded Auth Management Panel */}
+                                  {expandedUserAuthPanel === user.username && (
+                                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-4 animate-in slide-in-from-top duration-200 font-sans">
+                                      <div className="border-b border-slate-200 pb-2">
+                                        <span className="text-xs font-black text-slate-800 uppercase tracking-wider block">
+                                          🔑 Gestão de Autorizações Especiais para {user.username}
+                                        </span>
+                                        <p className="text-[10px] text-slate-455 mt-0.5 leading-normal">
+                                          Permite conceder acessos pontuais ou permanentes para consulta ou atos em processos específicos ou em todos do sistema.
+                                        </p>
+                                      </div>
+
+                                      {/* List existing special authorizations */}
+                                      <div className="space-y-2">
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Autorizações Ativas ({adminAuthsList.length})</span>
+                                        {adminAuthsList.length === 0 ? (
+                                          <p className="text-[10.5px] text-slate-400 italic">Nenhuma autorização especial ativa para este utilizador.</p>
+                                        ) : (
+                                          <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                                            {adminAuthsList.map((auth) => {
+                                              const active = isAuthorizationActive(auth.createdAt, auth.expiraEm || auth.limiteData);
+                                              return (
+                                                <div key={auth.id} className={`flex justify-between items-center bg-white p-2.5 border border-slate-200 rounded-lg text-[11px] ${!active ? 'opacity-50 line-through bg-slate-50/50' : ''}`}>
+                                                  <div className="space-y-0.5">
+                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                      <span className={`text-[9px] font-bold uppercase px-1.5 py-0.2 rounded ${
+                                                        auth.perm === 'todos' ? 'bg-amber-100 text-amber-800' : 'bg-zinc-100 text-zinc-700'
+                                                      }`}>
+                                                        {auth.perm === 'todos' ? 'Atos Completos' : 'Apenas Consulta'}
+                                                      </span>
+                                                      <span className="font-bold text-slate-750">
+                                                        {auth.scope === 'todos' ? 'Todos os Processos' : `Processo(s): ${auth.processoNumeros?.join(', ')}`}
+                                                      </span>
+                                                      {!active && <span className="text-[9px] font-bold text-rose-500 uppercase">Expirada</span>}
+                                                    </div>
+                                                    <div className="flex items-center gap-1 text-[9.5px] text-slate-455">
+                                                      <span>
+                                                        Validade: {auth.expiraEm ? `Até ${auth.expiraEm} às 23:59` : `Até ${new Date(new Date(auth.createdAt).getTime() + 48*60*60*1000).toLocaleString('pt-PT', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})} (48h)`}
+                                                      </span>
+                                                      <span>•</span>
+                                                      <span>Criada em: {auth.createdAt.split('T')[0]}</span>
+                                                    </div>
+                                                  </div>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleRevokeAdminAuth(auth.id, user.username)}
+                                                    className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"
+                                                    title="Revogar autorização"
+                                                  >
+                                                    <Trash2 className="h-3.5 w-3.5" />
+                                                  </button>
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
+                                      </div>
+
+                                      {/* Form to grant a new authorization */}
+                                      <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3.5">
+                                        <span className="text-[10px] font-bold text-slate-700 uppercase tracking-widest block border-b border-slate-100 pb-1">Conceder Novo Acesso</span>
+                                        
+                                        <div>
+                                          <label className="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider mb-1">Data Limite de Autorização (Opcional)</label>
+                                          <input
+                                            type="date"
+                                            value={authExpiraEm}
+                                            onChange={(e) => setAuthExpiraEm(e.target.value)}
+                                            className="block w-full rounded bg-slate-50 border border-slate-200 px-2.5 py-1.2 text-xs text-slate-750 font-bold focus:border-blue-500 focus:outline-hidden font-mono"
+                                          />
+                                          <p className="text-[9.5px] text-slate-400 mt-1 leading-normal italic">
+                                            * Se não fixar a data limite, a autorização será automaticamente dada pelo período de 48 horas (2 dias), cessando automaticamente no fim do período. Se fixar, termina às 23:59:59 desse dia.
+                                          </p>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-xs">
+                                          {/* Scope */}
+                                          <div>
+                                            <label className="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider mb-1">Âmbito dos Processos</label>
+                                            <select
+                                              value={authScope}
+                                              onChange={(e) => setAuthScope(e.target.value as any)}
+                                              className="block w-full rounded bg-slate-50 border border-slate-200 px-2.5 py-1.5 text-xs text-slate-750 font-semibold focus:border-blue-500 focus:outline-hidden"
+                                            >
+                                              <option value="todos">Todos os Processos do Tribunal</option>
+                                              <option value="alguns">Processos Específicos</option>
+                                            </select>
+                                          </div>
+
+                                          {/* Permission Level */}
+                                          <div>
+                                            <label className="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider mb-1">Nível de Permissão</label>
+                                            <select
+                                              value={authPerm}
+                                              onChange={(e) => setAuthPerm(e.target.value as any)}
+                                              className="block w-full rounded bg-slate-50 border border-slate-200 px-2.5 py-1.5 text-xs text-slate-750 font-semibold focus:border-blue-500 focus:outline-hidden"
+                                            >
+                                              <option value="consulta">Apenas Consulta (Visualização)</option>
+                                              <option value="todos">Praticar Todos os Atos (Escrita Completa)</option>
+                                            </select>
+                                          </div>
+                                        </div>
+
+                                        {/* Select Specific Processos (if Scope is 'alguns' or 'uns') */}
+                                        {(authScope === 'alguns' || authScope === 'uns') && (
+                                          <div className="space-y-1.5">
+                                            <label className="block text-[9.5px] font-bold text-slate-500 uppercase tracking-wider">Selecione o(s) Processo(s) *</label>
+                                            <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2 bg-slate-50 space-y-1">
+                                              {processosList
+                                                .filter(p => !p.deleted && !p.parentProcessoNumero && !isUserNativelyAssociatedWithProcess(user, p))
+                                                .map(p => {
+                                                  const isChecked = authSelectedProcessos.includes(p.numero);
+                                                  return (
+                                                    <label key={p.numero} className="flex items-center gap-2 text-[10.5px] font-medium text-slate-700 cursor-pointer hover:bg-white p-1 rounded">
+                                                      <input
+                                                        type="checkbox"
+                                                        checked={isChecked}
+                                                        onChange={() => {
+                                                          if (isChecked) {
+                                                            setAuthSelectedProcessos(prev => prev.filter(num => num !== p.numero));
+                                                          } else {
+                                                            setAuthSelectedProcessos(prev => [...prev, p.numero]);
+                                                          }
+                                                        }}
+                                                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 h-3.5 w-3.5 cursor-pointer"
+                                                      />
+                                                      <span className="font-mono font-bold text-slate-900">{p.numero}</span>
+                                                      <span className="text-slate-400 font-normal truncate">• {p.autores.join(', ')} vs {p.reus.join(', ')}</span>
+                                                    </label>
+                                                  );
+                                                })}
+                                              {processosList.filter(p => !p.deleted && !p.parentProcessoNumero && !isUserNativelyAssociatedWithProcess(user, p)).length === 0 && (
+                                                <p className="text-[10px] text-slate-400 italic">O utilizador já está inserido na ficha de todos os processos disponíveis ou não existem processos registados.</p>
+                                              )}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        <button
+                                          type="button"
+                                          onClick={() => handleGrantAdminAuth(user.username)}
+                                          className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer font-display shadow-2xs"
+                                        >
+                                          Conceder Autorização Especial
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
                               );
                             })}
@@ -6865,7 +7486,7 @@ export default function App() {
                             Adicionar Nova Comarca / Seção
                           </strong>
                           <p className="text-[11px] text-slate-500 leading-normal">
-                            Registe novos tribunais ou secções judiciais na base local para associar a secretarias, funcionários ou modelos de notificação.
+                            Registe novos tribunais ou secções judiciais na base local para associar a secretarias e funcionários.
                           </p>
                         </div>
 
@@ -7416,6 +8037,193 @@ export default function App() {
                         </div>
 
                       </div>
+
+                      {/* PAINEL DE TRANSFERÊNCIA EM BLOCO POR MUDANÇA DE TRIBUNAL */}
+                      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm mt-6 space-y-6 animate-in fade-in duration-200" id="bulk-transfer-panel">
+                        <div className="border-b border-slate-100 pb-3">
+                          <strong className="text-xs font-bold text-slate-400 uppercase tracking-widest block">
+                            🔄 Transferência / Substituição de Profissionais em Bloco (Mudança de Tribunal)
+                          </strong>
+                          <p className="text-[11px] text-slate-500 mt-1 leading-normal font-medium">
+                            Selecione um juiz, procurador ou funcionário para transferir os seus processos para outro profissional em lote (bloco).
+                          </p>
+                        </div>
+
+                        {bulkSuccessMessage && (
+                          <div className="rounded-lg bg-emerald-50 p-3 border border-emerald-100 text-emerald-700 text-xs font-bold animate-in fade-in duration-200">
+                            ✓ {bulkSuccessMessage}
+                          </div>
+                        )}
+                        {bulkErrorMessage && (
+                          <div className="rounded-lg bg-red-50 p-3 border border-red-100 text-red-600 text-xs font-bold animate-in fade-in duration-200">
+                            ⚠ {bulkErrorMessage}
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                          {/* 1. Tipo de Profissional */}
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                              1. Categoria do Profissional
+                            </label>
+                            <div className="flex gap-2">
+                              {(['juiz', 'procurador', 'funcionario'] as const).map((t) => (
+                                <button
+                                  key={t}
+                                  type="button"
+                                  onClick={() => {
+                                    setBulkType(t);
+                                    setBulkOriginal('');
+                                    setBulkTarget('');
+                                    setBulkSelectedNums([]);
+                                  }}
+                                  className={`flex-1 py-1.5 rounded-lg border text-center font-bold capitalize transition-all cursor-pointer ${
+                                    bulkType === t
+                                      ? 'bg-blue-600 text-white border-blue-600'
+                                      : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                                  }`}
+                                >
+                                  {t === 'juiz' ? 'Juiz' : t === 'procurador' ? 'Procurador' : 'Funcionário'}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* 2. Profissional Original */}
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                              2. Profissional Original (A Substituir)
+                            </label>
+                            <select
+                              value={bulkOriginal}
+                              onChange={(e) => {
+                                setBulkOriginal(e.target.value);
+                                setBulkSelectedNums([]); // Reset selection when changing original
+                              }}
+                              className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-705 font-semibold focus:border-blue-500 focus:outline-hidden cursor-pointer"
+                            >
+                              <option value="">-- Selecione o Profissional Original --</option>
+                              {bulkType === 'juiz' && juizes.map(j => <option key={j} value={j}>⚖️ Juiz: {j}</option>)}
+                              {bulkType === 'procurador' && globalProcuradores.map(p => <option key={p} value={p}>🏛️ MP: {p}</option>)}
+                              {bulkType === 'funcionario' && funcionarios.map(f => <option key={f} value={f}>🗒️ Of.: {f}</option>)}
+                            </select>
+                          </div>
+
+                          {/* 3. Profissional de Destino (Substituto) */}
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                              3. Novo Profissional (Substituto)
+                            </label>
+                            <select
+                              value={bulkTarget}
+                              onChange={(e) => setBulkTarget(e.target.value)}
+                              disabled={!bulkOriginal}
+                              className="w-full rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-705 font-semibold focus:border-blue-500 focus:outline-hidden disabled:opacity-50 cursor-pointer"
+                            >
+                              <option value="">-- Selecione o Substituto --</option>
+                              {bulkType === 'juiz' && juizes.filter(j => j !== bulkOriginal).map(j => <option key={j} value={j}>⚖️ Juiz: {j}</option>)}
+                              {bulkType === 'procurador' && globalProcuradores.filter(p => p !== bulkOriginal).map(p => <option key={p} value={p}>🏛️ MP: {p}</option>)}
+                              {bulkType === 'funcionario' && funcionarios.filter(f => f !== bulkOriginal).map(f => <option key={f} value={f}>🗒️ Of.: {f}</option>)}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* LIST OF ASSOCIATED PROCESSES */}
+                        {bulkOriginal && (
+                          <div className="space-y-3 pt-3 border-t border-slate-100">
+                            {(() => {
+                              const matching = bulkType === 'juiz' 
+                                ? processosList.filter(p => !p.deleted && p.juizTitular === bulkOriginal)
+                                : bulkType === 'procurador'
+                                  ? processosList.filter(p => !p.deleted && p.procuradores?.includes(bulkOriginal))
+                                  : processosList.filter(p => !p.deleted && p.funcionarios?.includes(bulkOriginal));
+
+                              const allNums = matching.map(p => p.numero);
+                              const allSelected = matching.length > 0 && allNums.every(num => bulkSelectedNums.includes(num));
+
+                              if (matching.length === 0) {
+                                return (
+                                  <div className="text-center py-6 text-slate-400 italic bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs">
+                                    Nenhum processo ativo encontrado associado ao profissional "{bulkOriginal}".
+                                  </div>
+                                );
+                              }
+
+                              return (
+                                <div className="space-y-3">
+                                  <div className="flex justify-between items-center bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                    <span className="text-xs font-bold text-slate-700">
+                                      💼 Processos Associados Encontrados ({matching.length})
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (allSelected) {
+                                          setBulkSelectedNums(prev => prev.filter(num => !allNums.includes(num)));
+                                        } else {
+                                          setBulkSelectedNums(prev => Array.from(new Set([...prev, ...allNums])));
+                                        }
+                                      }}
+                                      className="px-2.5 py-1 text-[10px] bg-slate-200 hover:bg-slate-300 text-slate-800 rounded font-bold uppercase cursor-pointer"
+                                    >
+                                      {allSelected ? 'Desmarcar Todos' : 'Selecionar Todos'}
+                                    </button>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-1">
+                                    {matching.map((p) => {
+                                      const isSel = bulkSelectedNums.includes(p.numero);
+                                      return (
+                                        <div
+                                          key={p.numero}
+                                          onClick={() => {
+                                            setBulkSelectedNums(prev => 
+                                              isSel ? prev.filter(num => num !== p.numero) : [...prev, p.numero]
+                                            );
+                                          }}
+                                          className={`p-3 rounded-xl border flex items-center gap-3 cursor-pointer transition-all ${
+                                            isSel 
+                                              ? 'bg-blue-50/50 border-blue-300 text-blue-950 font-semibold shadow-3xs' 
+                                              : 'bg-white border-slate-150 hover:bg-slate-50/50'
+                                          }`}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={isSel}
+                                            onChange={() => {}} // handled by parent onClick
+                                            className="rounded text-blue-600 focus:ring-blue-500 cursor-pointer h-3.5 w-3.5"
+                                          />
+                                          <div className="text-left text-[11px] min-w-0 flex-1">
+                                            <div className="font-bold flex justify-between">
+                                              <span className="text-slate-900 font-mono">{p.numero}</span>
+                                              <span className="text-[9px] uppercase font-bold text-slate-400">{p.tipo || 'Cível'}</span>
+                                            </div>
+                                            <div className="text-slate-500 truncate mt-0.5">
+                                              {p.autores?.[0] || 'N/A'} c/ {p.reus?.[0] || 'N/A'}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+
+                                  <div className="flex justify-end pt-2">
+                                    <button
+                                      type="button"
+                                      onClick={handleExecuteBulkTransfer}
+                                      disabled={!bulkTarget || bulkSelectedNums.length === 0}
+                                      className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-xs transition-colors cursor-pointer"
+                                    >
+                                      🔄 Executar Substituição em Bloco ({bulkSelectedNums.length})
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )}
+                      </div>
+
                     </div>
                   )}
 

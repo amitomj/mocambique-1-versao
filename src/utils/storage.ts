@@ -172,6 +172,25 @@ export function saveUser(user: User): boolean {
   return true;
 }
 
+export function deleteUser(username: string): User[] {
+  const users = getUsers();
+  const updated = users.filter(u => u.username.toLowerCase() !== username.toLowerCase());
+  localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updated));
+  return updated;
+}
+
+export function toggleUserActive(username: string): User[] {
+  const users = getUsers();
+  const updated = users.map(u => {
+    if (u.username.toLowerCase() === username.toLowerCase()) {
+      return { ...u, active: u.active === false ? true : false };
+    }
+    return u;
+  });
+  localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updated));
+  return updated;
+}
+
 export function createFirstAdmin(username: string, passwordString: string, tribunalId?: string): User {
   const firstAdmin: User = {
     username,
@@ -639,6 +658,32 @@ export function getSimulatedDiskPathStructure(): DiskFolder[] {
 }
 
 // Juízes persistence helpers
+export function generateFirstUsername(fullName: string): string {
+  let parts = fullName.trim().split(/\s+/);
+  // remove common Portuguese titles if they appear as the first word
+  const titles = ['dr.', 'dr', 'dra.', 'dra', 'juiz', 'procurador', 'desembargador', 'juiza', 'sr.', 'sr', 'sra.', 'sra', 'senhor', 'senhora', 'oficial'];
+  if (parts.length > 1 && titles.includes(parts[0].toLowerCase())) {
+    parts.shift();
+  }
+  const firstName = parts[0] || 'user';
+  return firstName
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .replace(/[^a-z0-9]/g, ""); // keep alpha-numeric only
+}
+
+export function generateUniqueUsername(fullName: string, users: User[]): string {
+  const base = generateFirstUsername(fullName);
+  let finalUsername = base;
+  let count = 1;
+  while (users.some(u => u.username.toLowerCase() === finalUsername.toLowerCase())) {
+    finalUsername = `${base}${count}`;
+    count++;
+  }
+  return finalUsername;
+}
+
 export function getJuizes(): string[] {
   const raw = localStorage.getItem('gestao_processos_juizes');
   if (!raw) {
@@ -664,7 +709,21 @@ export function saveJuiz(nome: string): { success: boolean; message: string; lis
   }
   juizes.push(novoNome);
   localStorage.setItem('gestao_processos_juizes', JSON.stringify(juizes));
-  return { success: true, message: "Juiz registado com sucesso.", list: juizes };
+
+  // Auto-create a user account for the judge
+  const users = getUsers();
+  const genUser = generateUniqueUsername(novoNome, users);
+  users.push({
+    username: genUser,
+    role: 'juiz',
+    password: '1234',
+    createdAt: new Date().toISOString(),
+    needsSetup: true,
+    fullName: novoNome
+  });
+  localStorage.setItem('gestao_processos_users', JSON.stringify(users));
+
+  return { success: true, message: `Juiz registado com sucesso. Criada conta de acesso (utilizador: ${genUser}, palavra-passe inicial: 1234).`, list: juizes };
 }
 
 export function deleteJuiz(nome: string): string[] {
@@ -736,7 +795,21 @@ export function saveProcurador(nome: string): { success: boolean; message: strin
   }
   procuradores.push(novoNome);
   localStorage.setItem('gestao_processos_procuradores', JSON.stringify(procuradores));
-  return { success: true, message: "Procurador registado com sucesso.", list: procuradores };
+
+  // Auto-create a user account for the procurador
+  const users = getUsers();
+  const genUser = generateUniqueUsername(novoNome, users);
+  users.push({
+    username: genUser,
+    role: 'procurador',
+    password: '1234',
+    createdAt: new Date().toISOString(),
+    needsSetup: true,
+    fullName: novoNome
+  });
+  localStorage.setItem('gestao_processos_users', JSON.stringify(users));
+
+  return { success: true, message: `Procurador registado com sucesso. Criada conta de acesso (utilizador: ${genUser}, palavra-passe inicial: 1234).`, list: procuradores };
 }
 
 export function deleteProcurador(nome: string): string[] {
@@ -772,7 +845,21 @@ export function saveFuncionario(nome: string): { success: boolean; message: stri
   }
   list.push(novoNome);
   localStorage.setItem('gestao_processos_funcionarios', JSON.stringify(list));
-  return { success: true, message: "Funcionário registado com sucesso.", list };
+
+  // Auto-create a user account for the funcionario
+  const users = getUsers();
+  const genUser = generateUniqueUsername(novoNome, users);
+  users.push({
+    username: genUser,
+    role: 'funcionario',
+    password: '1234',
+    createdAt: new Date().toISOString(),
+    needsSetup: true,
+    fullName: novoNome
+  });
+  localStorage.setItem('gestao_processos_users', JSON.stringify(users));
+
+  return { success: true, message: `Funcionário registado com sucesso. Criada conta de acesso (utilizador: ${genUser}, palavra-passe inicial: 1234).`, list };
 }
 
 export function deleteFuncionario(nome: string): string[] {
@@ -960,4 +1047,780 @@ export function deleteNotificacao(id: string): ProcessNotificacao[] {
   localStorage.setItem(STORAGE_KEYS.NOTIFICACOES, JSON.stringify(updated));
   return updated;
 }
+
+export function isAuthorizationActive(createdAt: string, limiteData?: string | null): boolean {
+  const now = new Date();
+  
+  if (limiteData) {
+    const parts = limiteData.split('-');
+    if (parts.length === 3) {
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      // Ends at 23:59:59.999 on that day local time
+      const expiryDate = new Date(year, month, day, 23, 59, 59, 999);
+      return now <= expiryDate;
+    }
+  }
+  
+  // If no limiteData, active for exactly 48 hours (2 days) starting from createdAt
+  const createdDate = new Date(createdAt);
+  const diffTime = now.getTime() - createdDate.getTime();
+  const fortyEightHours = 48 * 60 * 60 * 1000;
+  return diffTime >= 0 && diffTime <= fortyEightHours;
+}
+
+export function matchUserAndFullName(userOrUsername: User | string, fullName: string): boolean {
+  if (!userOrUsername || !fullName) return false;
+  
+  let username = "";
+  let userFullName = "";
+  
+  if (typeof userOrUsername === 'string') {
+    username = userOrUsername;
+  } else if (userOrUsername && typeof userOrUsername === 'object') {
+    username = (userOrUsername as any).username || "";
+    userFullName = (userOrUsername as any).fullName || "";
+  }
+  
+  const clean = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  
+  const fClean = clean(fullName);
+  const uClean = clean(username);
+  const ufClean = userFullName ? clean(userFullName) : "";
+  
+  // 1. Prioritize user's fullName matching if present
+  if (ufClean) {
+    if (ufClean === fClean || fClean.includes(ufClean) || ufClean.includes(fClean)) {
+      return true;
+    }
+    const ignoreWords = ['funcionario', 'juiz', 'procurador', 'advogado', 'autor', 'reu', 'secretaria', 'comarca', 'tribunal', 'dra', 'dr', 'de', 'do', 'da', 'os', 'as', 'dos', 'das', 'em', 'e', 'para', 'na', 'no'];
+    const partsF = ufClean.split(/[._\s-]+/).filter(part => part.length >= 2 && !ignoreWords.includes(part));
+    if (partsF.length > 0 && partsF.every(part => fClean.includes(part))) {
+      return true;
+    }
+  }
+  
+  // 2. Fallback to username matching
+  if (uClean === fClean || fClean.includes(uClean) || uClean.includes(fClean)) {
+    return true;
+  }
+  
+  const ignoreWords = ['funcionario', 'juiz', 'procurador', 'advogado', 'autor', 'reu', 'secretaria', 'comarca', 'tribunal', 'dra', 'dr', 'de', 'do', 'da', 'os', 'as', 'dos', 'das', 'em', 'e', 'para', 'na', 'no'];
+  // Part-based matching (split by dots, underscores, spaces, hyphens)
+  const parts = uClean.split(/[._\s-]+/).filter(part => part.length >= 2 && !ignoreWords.includes(part));
+  if (parts.length > 0) {
+    // Every part of the username must be contained in the full name
+    return parts.every(part => fClean.includes(part));
+  }
+  
+  return false;
+}
+
+export function getUserPermissionForProcess(user: User | null, p: Processo): 'consulta' | 'todos' | 'nenhuma' {
+  if (!user) return 'nenhuma';
+  if (user.role === 'administrador') return 'todos';
+  
+  const uname = user.username.toLowerCase().trim();
+  const matches = (fullName: string) => {
+    return matchUserAndFullName(user, fullName);
+  };
+
+  // 1. Check Native Association
+  let isNative = false;
+  if (user.role === 'juiz' && matches(p.juizTitular)) isNative = true;
+  if (user.role === 'procurador' && p.procuradores?.some(matches)) isNative = true;
+  if (user.role === 'funcionario' && p.funcionarios?.some(matches)) isNative = true;
+  if (user.role === 'advogado' && (p.advogadosAutor?.some(matches) || p.advogadosReu?.some(matches))) isNative = true;
+
+  let highestPerm: 'consulta' | 'todos' | 'nenhuma' = isNative ? 'todos' : 'nenhuma';
+
+  // 2. Check Peer-to-Peer Shared Authorizations
+  try {
+    const rawShared = localStorage.getItem('gestao_processos_autorizacoes_partilhadas');
+    if (rawShared) {
+      const list: any[] = JSON.parse(rawShared);
+      const matchedShared = list.filter(item => 
+        item.processoNumero === p.numero && 
+        item.grantedTo.toLowerCase().trim() === uname &&
+        item.role === user.role
+      );
+      for (const item of matchedShared) {
+        if (!isAuthorizationActive(item.createdAt, item.limiteData)) {
+          continue;
+        }
+        if (item.perm === 'todos') {
+          highestPerm = 'todos';
+        } else if (item.perm === 'consulta' && highestPerm === 'nenhuma') {
+          highestPerm = 'consulta';
+        }
+      }
+    }
+  } catch (e) {
+    console.error(e);
+  }
+
+  // 3. Check Admin Authorizations
+  try {
+    const rawAdmin = localStorage.getItem('gestao_processos_autorizacoes_admin');
+    if (rawAdmin) {
+      const list: any[] = JSON.parse(rawAdmin);
+      const matchedAdmin = list.filter(item => 
+        item.userId.toLowerCase().trim() === uname
+      );
+      
+      for (const item of matchedAdmin) {
+        if (!isAuthorizationActive(item.createdAt, item.expiraEm || item.limiteData)) {
+          continue;
+        }
+        
+        // Check scope
+        let scopeMatches = false;
+        if (item.scope === 'todos') {
+          scopeMatches = true;
+        } else if ((item.scope === 'uns' || item.scope === 'alguns') && item.processoNumeros && item.processoNumeros.includes(p.numero)) {
+          scopeMatches = true;
+        }
+        
+        if (scopeMatches) {
+          if (item.perm === 'todos') {
+            highestPerm = 'todos';
+          } else if (item.perm === 'consulta' && highestPerm === 'nenhuma') {
+            highestPerm = 'consulta';
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error(e);
+  }
+
+  return highestPerm;
+}
+
+export function isUserAssociatedWithProcess(user: User | null, p: Processo): boolean {
+  return getUserPermissionForProcess(user, p) !== 'nenhuma';
+}
+
+export function isUserNativelyAssociatedWithProcess(user: User | null, p: Processo): boolean {
+  if (!user) return false;
+  if (user.role === 'administrador') return true;
+  
+  const matches = (fullName: string) => {
+    return matchUserAndFullName(user, fullName);
+  };
+
+  if (user.role === 'juiz' && matches(p.juizTitular)) return true;
+  if (user.role === 'procurador' && p.procuradores?.some(matches)) return true;
+  if (user.role === 'funcionario' && p.funcionarios?.some(matches)) return true;
+  if (user.role === 'advogado' && (p.advogadosAutor?.some(matches) || p.advogadosReu?.some(matches))) return true;
+
+  return false;
+}
+
+export function isUserAuthorizedForProcess(user: User | null, p: Processo): boolean {
+  if (!user) return false;
+  if (user.role === 'administrador') return false;
+  return isUserAssociatedWithProcess(user, p) && !isUserNativelyAssociatedWithProcess(user, p);
+}
+
+export interface AdminAuth {
+  id: string;
+  userId: string;
+  tipo: 'permanente' | 'temporaria';
+  expiraEm?: string; // YYYY-MM-DD
+  scope: 'todos' | 'uns' | 'alguns';
+  processoNumeros?: string[]; // processes
+  perm: 'consulta' | 'todos';
+  createdAt: string;
+}
+
+export function getAdminAuthorizations(): AdminAuth[] {
+  try {
+    const raw = localStorage.getItem('gestao_processos_autorizacoes_admin');
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    console.error(e);
+    return [];
+  }
+}
+
+export function saveAdminAuthorization(auth: AdminAuth): void {
+  try {
+    const list = getAdminAuthorizations();
+    const existingIndex = list.findIndex(item => item.id === auth.id);
+    if (existingIndex >= 0) {
+      list[existingIndex] = auth;
+    } else {
+      list.push(auth);
+    }
+    localStorage.setItem('gestao_processos_autorizacoes_admin', JSON.stringify(list));
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+export function deleteAdminAuthorization(id: string): void {
+  try {
+    const list = getAdminAuthorizations();
+    const filtered = list.filter(item => item.id !== id);
+    localStorage.setItem('gestao_processos_autorizacoes_admin', JSON.stringify(filtered));
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+export function seedFictitiousData(): { success: boolean; message: string; processos: Processo[] } {
+  // 1. Seed Juízes
+  const juizesSeed = [
+    "Dra. Joana Almerinda Chissano",
+    "Dr. Alberto Francisco Maleiane",
+    "Dra. Maria Lurdes de Oliveira",
+    "Dr. Tomás Nhassengo"
+  ];
+  localStorage.setItem('gestao_processos_juizes', JSON.stringify(juizesSeed));
+
+  // 2. Seed Advogados
+  const advogadosSeed = [
+    "Dr. Gilberto Ismael",
+    "Dra. Sheila de Lemos",
+    "Dr. Abdul Carimo",
+    "Dra. Patrícia da Silva"
+  ];
+  localStorage.setItem('gestao_processos_advogados', JSON.stringify(advogadosSeed));
+
+  // 3. Seed Procuradores
+  const procuradoresSeed = [
+    "Dra. Beatriz Custódio Tembe",
+    "Dr. Amílcar Amade Miquidade",
+    "Dra. Ana Maria Sitoe",
+    "Dr. Salomão Mungoi"
+  ];
+  localStorage.setItem('gestao_processos_procuradores', JSON.stringify(procuradoresSeed));
+
+  // 4. Seed Funcionários
+  const funcionariosSeed = [
+    "Armando Mateus Bila",
+    "Telma Hortênsia Langa",
+    "Isabel Margarida Mucavele",
+    "Carlos Daniel Cossa"
+  ];
+  localStorage.setItem('gestao_processos_funcionarios', JSON.stringify(funcionariosSeed));
+
+  // 5. Seed detailed Intervenientes Fichas
+  const intervenientesFichas = [
+    {
+      nome: "Sociedade Moçambicana de Investimentos, S.A.",
+      nuit: "400129384",
+      nomePai: "N/A",
+      nomeMae: "N/A",
+      dataNascimento: "2010-04-12",
+      bilheteIdentidade: "N/A",
+      profissao: "Sociedade Comercial",
+      moradas: [{ id: "m1", endereco: "Av. Karl Marx, n.º 1420, Maputo", isAtual: true }],
+      telefone: "+258 21 330 400",
+      email: "geral@smi.co.mz",
+      tipo: "autor"
+    },
+    {
+      nome: "Banco Comercial e de Fomento, S.A.",
+      nuit: "400192843",
+      nomePai: "N/A",
+      nomeMae: "N/A",
+      dataNascimento: "1998-11-22",
+      bilheteIdentidade: "N/A",
+      profissao: "Instituição Financeira",
+      moradas: [{ id: "m2", endereco: "Av. 25 de Setembro, n.º 844, Maputo", isAtual: true }],
+      telefone: "+258 21 445 500",
+      email: "contacto@bcf.co.mz",
+      tipo: "reu"
+    },
+    {
+      nome: "Construtora do Índico, Lda.",
+      nuit: "400582931",
+      nomePai: "N/A",
+      nomeMae: "N/A",
+      dataNascimento: "2015-08-01",
+      bilheteIdentidade: "N/A",
+      profissao: "Construção Civil",
+      moradas: [{ id: "m3", endereco: "Av. de Angola, n.º 2300, Maputo", isAtual: true }],
+      telefone: "+258 84 990 1234",
+      email: "obras@indico.co.mz",
+      tipo: "autor"
+    },
+    {
+      nome: "Telecomunicações de Moçambique (TDM)",
+      nuit: "400283748",
+      nomePai: "N/A",
+      nomeMae: "N/A",
+      dataNascimento: "1981-06-01",
+      bilheteIdentidade: "N/A",
+      profissao: "Telecomunicações",
+      moradas: [{ id: "m4", endereco: "Rua da Sé, n.º 12, Maputo", isAtual: true }],
+      telefone: "+258 21 000 111",
+      email: "suporte@tdm.mz",
+      tipo: "reu"
+    },
+    {
+      nome: "Mussa Almor Amade",
+      nuit: "102938472",
+      nomePai: "Almor Selemane Amade",
+      nomeMae: "Fátima Zaida Amade",
+      dataNascimento: "1978-05-14",
+      bilheteIdentidade: "1102938472B",
+      profissao: "Empresário",
+      moradas: [{ id: "m5", endereco: "Av. Julius Nyerere, n.º 312, Maputo", isAtual: true }],
+      telefone: "+258 82 445 1234",
+      email: "mussa.amade@gmail.com",
+      tipo: "autor"
+    },
+    {
+      nome: "Celeste Eunice Mondlane",
+      nuit: "129384812",
+      nomePai: "Eunice Mondlane",
+      nomeMae: "Mariana Mondlane",
+      dataNascimento: "1985-09-21",
+      bilheteIdentidade: "129384812C",
+      profissao: "Docente",
+      moradas: [{ id: "m6", endereco: "Av. Eduardo Mondlane, n.º 1500, Maputo", isAtual: true }],
+      telefone: "+258 84 123 4567",
+      email: "celeste.mondlane@gmail.com",
+      tipo: "reu"
+    }
+  ];
+  localStorage.setItem('gestao_processos_intervenientes_fichas', JSON.stringify(intervenientesFichas));
+
+  // 6. Seed detailed Advogados Fichas
+  const advogadosFichas = [
+    {
+      nome: "Dr. Gilberto Ismael",
+      cedulaProfissional: "1452",
+      bilheteIdentidade: "11234567A",
+      moradasProfissionais: [{ id: "a1", endereco: "Av. Kim Il Sung, n.º 450, Maputo", isAtual: true }],
+      telefone: "+258 84 332 1100",
+      email: "gilberto.ismael@oam.org.mz",
+      fax: "+258 21 440 220"
+    },
+    {
+      nome: "Dra. Sheila de Lemos",
+      cedulaProfissional: "2311",
+      bilheteIdentidade: "12345678B",
+      moradasProfissionais: [{ id: "a2", endereco: "Av. Mao Tse Tung, n.º 1120, Maputo", isAtual: true }],
+      telefone: "+258 84 550 4422",
+      email: "sheila.lemos@oam.org.mz",
+      fax: "+258 21 440 221"
+    },
+    {
+      nome: "Dr. Abdul Carimo",
+      cedulaProfissional: "844",
+      bilheteIdentidade: "13456789C",
+      moradasProfissionais: [{ id: "a3", endereco: "Av. Kenneth Kaunda, n.º 88, Maputo", isAtual: true }],
+      telefone: "+258 82 120 4455",
+      email: "abdul.carimo@oam.org.mz",
+      fax: "+258 21 440 222"
+    },
+    {
+      nome: "Dra. Patrícia da Silva",
+      cedulaProfissional: "3105",
+      bilheteIdentidade: "14567890D",
+      moradasProfissionais: [{ id: "a4", endereco: "Rua de Bagamoyo, n.º 15, Maputo", isAtual: true }],
+      telefone: "+258 84 990 8822",
+      email: "patricia.silva@oam.org.mz",
+      fax: "+258 21 440 223"
+    }
+  ];
+  localStorage.setItem('gestao_processos_advogados_detalhados_fichas', JSON.stringify(advogadosFichas));
+
+  // 7. Seed System Users (Juiz, Procurador, Clerks, Lawyers) to easily switch roles
+  const currentUsers = getUsers();
+  const newUsersSeed = [
+    { username: "antonio.j.gomes@csm.org.pt", role: 'administrador' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-csm', fullName: "António J. Gomes" },
+    { username: "joana.chissano", role: 'juiz' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-maputo', fullName: "Dra. Joana Almerinda Chissano" },
+    { username: "alberto.maleiane", role: 'juiz' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-maputo', fullName: "Dr. Alberto Francisco Maleiane" },
+    { username: "beatriz.tembe", role: 'procurador' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-maputo', fullName: "Dra. Beatriz Custódio Tembe" },
+    { username: "armando.bila", role: 'funcionario' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-maputo', fullName: "Armando Mateus Bila" },
+    { username: "gilberto.ismael", role: 'advogado' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-maputo', fullName: "Dr. Gilberto Ismael" },
+    { username: "sheila.lemos", role: 'advogado' as const, password: "123", createdAt: new Date().toISOString(), tribunalId: 't-maputo', fullName: "Dra. Sheila de Lemos" }
+  ];
+  
+  // Merge users, keeping duplicates overwritten with fresh test passwords
+  const mergedUsers = [...currentUsers];
+  newUsersSeed.forEach(seedU => {
+    const idx = mergedUsers.findIndex(u => u.username.toLowerCase() === seedU.username.toLowerCase());
+    if (idx !== -1) {
+      mergedUsers[idx] = seedU;
+    } else {
+      mergedUsers.push(seedU);
+    }
+  });
+  localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(mergedUsers));
+
+  // 8. 4 Processos Fictícios
+  const baseDocsSeed = [
+    {
+      id: generateId(),
+      nome: "Peticao_Inicial_Assinada_SMI.pdf",
+      categoria: "Petição inicial",
+      dataApresentacao: "2026-05-10",
+      parteApresentante: "Sociedade Moçambicana de Investimentos, S.A.",
+      advogadoApresentante: "Dr. Gilberto Ismael",
+      conteudoUrl: MINIMAL_PDF_BASE64,
+      conteudoTexto: "EXCELENTÍSSIMO SENHOR DOUTOR JUIZ DE DIREITO DA SECÇÃO COMERCIAL DO TRIBUNAL JUDICIAL DA CIDADE DE MAPUTO\n\nSOCIEDADE MOÇAMBICANA DE INVESTIMENTOS, S.A., NUIT 400129384, com sede em Maputo, vem por este meio intentar a presente ACÇÃO ORDINÁRIA DE INCUMPRIMENTO CONTRATUAL E PERDAS E DANOS contra BANCO COMERCIAL E DE FOMENTO, S.A., NUIT 400192843, com base nos factos que passa a expor:\n1. As partes celebraram um contrato de garantia de investimento e mútuo financeiro.\n2. O Réu recusou injustificadamente a libertação das tranches de crédito acordadas.\n3. Disso resultou avultado prejuízo na ordem dos 12.500.000 MT.\n\nTermos em que requer a V.Excia se digne julgar provada e procedente a presente acção.\n\nPedem Deferimento.",
+      tamanho: "142 KB",
+      tipoMime: "application/pdf",
+      valorTaxaJustica: 150000,
+      pagadorTaxaJustica: "Sociedade Moçambicana de Investimentos, S.A."
+    },
+    {
+      id: generateId(),
+      nome: "Contestacao_BCF_Oposicao.pdf",
+      categoria: "Contestação (incluindo com reconvenção ou de contas)",
+      dataApresentacao: "2026-05-25",
+      parteApresentante: "Banco Comercial e de Fomento, S.A.",
+      advogadoApresentante: "Dra. Sheila de Lemos",
+      conteudoUrl: MINIMAL_PDF_BASE64,
+      conteudoTexto: "CONTESTAÇÃO DO RÉU BANCO COMERCIAL E DE FOMENTO, S.A.\n\nO Réu, devidamente notificado, vem oferecer a sua contestação:\n1. A recusa de financiamento deveu-se à falta de apresentação de garantias colaterais de primeiro grau.\n2. O Autor encontrava-se em situação de incumprimento com outras entidades do grupo financeiro.\n3. Inexistência de perdas e danos imputáveis a esta instituição.\n\nRequer-se a absolvição do Réu do pedido.\n\nAdvogado do Réu, Dra. Sheila de Lemos.",
+      tamanho: "98 KB",
+      tipoMime: "application/pdf"
+    }
+  ];
+
+  const processos: Processo[] = [
+    // Processo 1
+    {
+      id: generateId(),
+      numero: "0042/TJCMP/2026",
+      autores: ["Sociedade Moçambicana de Investimentos, S.A."],
+      reus: ["Banco Comercial e de Fomento, S.A."],
+      dataAutuacao: "2026-05-10",
+      juizTitular: "Dra. Joana Almerinda Chissano",
+      advogadosAutor: ["Dr. Gilberto Ismael"],
+      advogadosReu: ["Dra. Sheila de Lemos"],
+      procuradores: [],
+      funcionarios: ["Armando Mateus Bila"],
+      notificacoesDestinatarios: ["Dr. Gilberto Ismael", "Dra. Sheila de Lemos"],
+      documentos: [baseDocsSeed[0], baseDocsSeed[1]],
+      createdAt: new Date().toISOString(),
+      tipo: "civel",
+      especieCivel: "Processo de declaração",
+      tipoAccaoCivel: "processo ordinário",
+      valorAcao: 12500000,
+      faseAtual: "Instrução e Saneamento",
+      alarmeAtivo: true,
+      alarmeTipo: "automatico",
+      alarmeData: "2026-07-24",
+      alarmeNota: "Alarme automático (60 dias após a contestação)",
+      alarmeDias: 60,
+      historicoAtos: [
+        {
+          id: generateId(),
+          data: "2026-05-25",
+          descricao: "Apresentação de Contestação pela parte Ré",
+          fase: "Articulados",
+          tipoAto: "Contestação / Defesa",
+          documentosIds: [baseDocsSeed[1].id],
+          parteAssociada: "Banco Comercial e de Fomento, S.A.",
+          advogadoPraticante: "Dra. Sheila de Lemos",
+          createdAt: new Date().toISOString()
+        },
+        {
+          id: generateId(),
+          data: "2026-05-10",
+          descricao: "Petição Inicial Autuada na Secretaria Geral",
+          fase: "Instrução Inicial",
+          tipoAto: "Petição inicial",
+          documentosIds: [baseDocsSeed[0].id],
+          parteAssociada: "Sociedade Moçambicana de Investimentos, S.A.",
+          advogadoPraticante: "Dr. Gilberto Ismael",
+          createdAt: new Date().toISOString()
+        }
+      ],
+      agendaCompromissos: [
+        {
+          id: generateId(),
+          titulo: "Audiência Preliminar de Conciliação e Fixação do Objeto do Litígio",
+          dataLimite: "2026-07-15",
+          destinatario: "Ambas as Partes",
+          responsavel: "Dra. Joana Almerinda Chissano",
+          fase: "Tentativa de Conciliação",
+          createdAt: new Date().toISOString()
+        }
+      ]
+    },
+    // Processo 2
+    {
+      id: generateId(),
+      numero: "0115/TJCMP/2026",
+      autores: ["Construtora do Índico, Lda."],
+      reus: ["Telecomunicações de Moçambique (TDM)"],
+      dataAutuacao: "2026-04-15",
+      juizTitular: "Dr. Alberto Francisco Maleiane",
+      advogadosAutor: ["Dr. Abdul Carimo"],
+      advogadosReu: ["Dra. Patrícia da Silva"],
+      procuradores: [],
+      funcionarios: ["Telma Hortênsia Langa"],
+      notificacoesDestinatarios: ["Dr. Abdul Carimo", "Dra. Patrícia da Silva"],
+      documentos: [
+        {
+          id: generateId(),
+          nome: "Requerimento_Executivo_Obras.pdf",
+          categoria: "Requerimento executivo",
+          dataApresentacao: "2026-04-15",
+          parteApresentante: "Construtora do Índico, Lda.",
+          advogadoApresentante: "Dr. Abdul Carimo",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "REQUERIMENTO EXECUTIVO PARA PAGAMENTO DE QUANTIA CERTA\n\nCONSTRUTORA DO ÍNDICO, LDA., vem requerer execução de dívida contra TELECOMUNICAÇÕES DE MOÇAMBIQUE (TDM):\n1. O exequente é credor da quantia líquida de 4.820.000 MT, titulada por faturas aceites e não pagas de empreitadas de canalização subterrânea.\n2. Esgotados os prazos amigáveis, resta a via judicial.\n3. Requer-se a imediata penhora de bens suficientes para solver a dívida.\n\nAdvogado Abdul Carimo.",
+          tamanho: "115 KB",
+          tipoMime: "application/pdf",
+          valorTaxaJustica: 50000,
+          pagadorTaxaJustica: "Construtora do Índico, Lda."
+        },
+        {
+          id: generateId(),
+          nome: "Auto_de_Penhora_Contas.pdf",
+          categoria: "Auto de penhora",
+          dataApresentacao: "2026-05-18",
+          parteApresentante: "Secretaria Judicial",
+          advogadoApresentante: "N/A",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "AUTO DE PENHORA DE ATIVOS FINANCEIROS\n\nAos dezoito dias do mês de Maio de 2026, eu, Telma Hortênsia Langa, Oficial de Justiça, procedi à penhora eletrónica de saldos bancários nas contas da executada Telecomunicações de Moçambique no valor reclamado de 4.820.000 MT. O saldo foi temporariamente indisponibilizado e transferido para a conta de depósitos à ordem do Tribunal.\n\nOficial de Justiça.",
+          tamanho: "88 KB",
+          tipoMime: "application/pdf"
+        }
+      ],
+      createdAt: new Date().toISOString(),
+      tipo: "civel",
+      especieCivel: "Processo de execução",
+      tipoAccaoCivel: "execução para pagamento de quantia certa",
+      valorAcao: 4820000,
+      faseAtual: "Penhora de Ativos",
+      alarmeAtivo: true,
+      alarmeTipo: "automatico",
+      alarmeData: "2026-07-18",
+      alarmeNota: "Alarme automático (60 dias após a penhora)",
+      alarmeDias: 60,
+      historicoAtos: [
+        {
+          id: generateId(),
+          data: "2026-05-18",
+          descricao: "Efetivação de Penhora Eletrónica de Contas Bancárias",
+          fase: "Penhora",
+          tipoAto: "Auto de penhora",
+          parteAssociada: "Telecomunicações de Moçambique (TDM)",
+          createdAt: new Date().toISOString()
+        },
+        {
+          id: generateId(),
+          data: "2026-04-15",
+          descricao: "Autuação de Ação Executiva de Título de Crédito",
+          fase: "Instrução Inicial",
+          tipoAto: "Requerimento executivo",
+          parteAssociada: "Construtora do Índico, Lda.",
+          advogadoPraticante: "Dr. Abdul Carimo",
+          createdAt: new Date().toISOString()
+        }
+      ],
+      agendaCompromissos: [
+        {
+          id: generateId(),
+          titulo: "Prazo Limite para Oposição à Execução pela Executada",
+          dataLimite: "2026-06-28",
+          destinatario: "Telecomunicações de Moçambique (TDM)",
+          responsavel: "Dra. Patrícia da Silva",
+          fase: "Oposição",
+          createdAt: new Date().toISOString()
+        }
+      ]
+    },
+    // Processo 3
+    {
+      id: generateId(),
+      numero: "0089/TJCMP/2026",
+      autores: ["Mussa Almor Amade"],
+      reus: ["Celeste Eunice Mondlane"],
+      dataAutuacao: "2026-02-20",
+      juizTitular: "Dra. Maria Lurdes de Oliveira",
+      advogadosAutor: ["Dr. Gilberto Ismael"],
+      advogadosReu: ["Dr. Abdul Carimo"],
+      procuradores: [],
+      funcionarios: ["Isabel Margarida Mucavele"],
+      notificacoesDestinatarios: ["Dr. Gilberto Ismael", "Dr. Abdul Carimo"],
+      documentos: [
+        {
+          id: generateId(),
+          nome: "Peticao_Inventario_Bens.pdf",
+          categoria: "Petição inicial",
+          dataApresentacao: "2026-02-20",
+          parteApresentante: "Mussa Almor Amade",
+          advogadoApresentante: "Dr. Gilberto Ismael",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "PETIÇÃO INICIAL DE INVENTÁRIO OBRIGATÓRIO\n\nMUSSA ALMOR AMADE, requer partilha judicial de herança por óbito de seu falecido pai, Almor Selemane Amade:\n1. O inventariado faleceu sem deixar testamento válido.\n2. Deixou bens imóveis e participações sociais em Maputo.\n3. O requerente e a interessada Celeste Eunice Mondlane divergem quanto às quotas partes e avaliação dos bens.\n\nRequer-se a nomeação de cabeça-de-casal e citação para partilha.",
+          tamanho: "95 KB",
+          tipoMime: "application/pdf"
+        },
+        {
+          id: generateId(),
+          nome: "Relacao_de_Bens_Heranca.pdf",
+          categoria: "Relação de bens",
+          dataApresentacao: "2026-03-15",
+          parteApresentante: "Celeste Eunice Mondlane",
+          advogadoApresentante: "Dr. Abdul Carimo",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "RELAÇÃO DE BENS APRESENTADA PELA CABEÇA-DE-CASAL CELESTE EUNICE MONDLANE\n\nLista descritiva:\nVerba 1: Prédio urbano sito na Avenida Julius Nyerere, n.º 312, Maputo, avaliado em 2.500.000 MT.\nVerba 2: Veículo ligeiro marca Toyota Hilux, matrícula MM-99-88, avaliado em 700.000 MT.\n\nMaputo, 15 de Março de 2026.",
+          tamanho: "76 KB",
+          tipoMime: "application/pdf"
+        }
+      ],
+      createdAt: new Date().toISOString(),
+      tipo: "civel",
+      especieCivel: "Processos especiais",
+      tipoAccaoCivel: "Inventário",
+      valorAcao: 3200000,
+      faseAtual: "Relação de Bens",
+      alarmeAtivo: true,
+      alarmeTipo: "automatico",
+      alarmeData: "2026-05-15",
+      alarmeNota: "Alarme automático (60 dias após a relação de bens)",
+      alarmeDias: 60,
+      historicoAtos: [
+        {
+          id: generateId(),
+          data: "2026-03-15",
+          descricao: "Apresentação da Relação de Bens pela interessada Cabeça-de-Casal",
+          fase: "Relação de Bens",
+          tipoAto: "Relação de bens",
+          parteAssociada: "Celeste Eunice Mondlane",
+          createdAt: new Date().toISOString()
+        },
+        {
+          id: generateId(),
+          data: "2026-02-20",
+          descricao: "Distribuição e Autuação da Ação de Inventário",
+          fase: "Instrução Inicial",
+          tipoAto: "Petição inicial",
+          parteAssociada: "Mussa Almor Amade",
+          advogadoPraticante: "Dr. Gilberto Ismael",
+          createdAt: new Date().toISOString()
+        }
+      ],
+      agendaCompromissos: [
+        {
+          id: generateId(),
+          titulo: "Audiência de Conferência de Interessados para Adjudicação de Quotas",
+          dataLimite: "2026-07-10",
+          destinatario: "Todos os Interessados",
+          responsavel: "Dra. Maria Lurdes de Oliveira",
+          fase: "Conferência",
+          createdAt: new Date().toISOString()
+        }
+      ]
+    },
+    // Processo 4
+    {
+      id: generateId(),
+      numero: "0312/TJCMP/2026",
+      autores: ["Ministério Público de Moçambique"],
+      reus: ["Celso Rogério Matsinhe", "Inácio Hilário Tembe"],
+      dataAutuacao: "2026-01-10",
+      juizTitular: "Dr. Tomás Nhassengo",
+      advogadosAutor: [],
+      advogadosReu: ["Dra. Sheila de Lemos"],
+      procuradores: ["Dra. Beatriz Custódio Tembe"],
+      funcionarios: ["Carlos Daniel Cossa"],
+      notificacoesDestinatarios: ["Dra. Beatriz Custódio Tembe", "Dra. Sheila de Lemos"],
+      documentos: [
+        {
+          id: generateId(),
+          nome: "Auto_Noticia_Burla_Bancaria.pdf",
+          categoria: "Auto de Notícia",
+          dataApresentacao: "2026-01-10",
+          parteApresentante: "Polícia de Investigação Criminal (SERNIC)",
+          advogadoApresentante: "N/A",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "AUTO DE NOTÍCIA E REGISTO DE INVESTIGAÇÃO\n\nConstatou-se através de denúncia interna do Banco de Investimentos de Moçambique a realização de transferências bancárias fraudulentas recorrendo a assinaturas e carimbos adulterados da Direção Nacional de Tesouro.\nOs arguidos Celso Rogério Matsinhe (Contabilista) e Inácio Hilário Tembe operavam contas falsas para branqueamento de capitais.",
+          tamanho: "128 KB",
+          tipoMime: "application/pdf"
+        },
+        {
+          id: generateId(),
+          nome: "Acusacao_Formal_MP_Burla.pdf",
+          categoria: "Acusação formal (Ministério Público)",
+          dataApresentacao: "2026-02-18",
+          parteApresentante: "Ministério Público de Moçambique",
+          advogadoApresentante: "N/A",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "ACUSAÇÃO FORMAL DO MINISTÉRIO PÚBLICO\n\nA Digníssima Procuradora da República Beatriz Custódio Tembe deduz acusação em processo comum contra os arguidos Celso Rogério Matsinhe e Inácio Hilário Tembe, imputando-lhes a prática em co-autoria material de:\n1. Crime de Burla Qualificada, previsto e punível pelo Código Penal Moçambicano.\n2. Branqueamento de Capitais e Falsificação de Documentos de Crédito.\n\nCom base em provas testemunhais e extratos bancários juntos.\n\nProcuradora, Dra. Beatriz Tembe.",
+          tamanho: "192 KB",
+          tipoMime: "application/pdf"
+        },
+        {
+          id: generateId(),
+          nome: "Despacho_Pronuncia_Crime.pdf",
+          categoria: "Despacho de Pronúncia",
+          dataApresentacao: "2026-03-22",
+          parteApresentante: "Tribunal Judicial",
+          advogadoApresentante: "N/A",
+          conteudoUrl: MINIMAL_PDF_BASE64,
+          conteudoTexto: "DESPACHO DE PRONÚNCIA CRIMINAL\n\nAnalisados os autos de instrução e a acusação formulada pelo Ministério Público, este juízo julga verosímeis e indiciados suficientemente os factos imputados aos arguidos.\nDetermino a PRONÚNCIA de Celso Rogério Matsinhe e Inácio Hilário Tembe por Burla Qualificada.\n\nRemeta-se para julgamento.\n\nJuiz de Direito, Dr. Tomás Nhassengo.",
+          tamanho: "110 KB",
+          tipoMime: "application/pdf"
+        }
+      ],
+      createdAt: new Date().toISOString(),
+      tipo: "crime",
+      faseAtual: "Julgamento Criminal",
+      alarmeAtivo: true,
+      alarmeTipo: "automatico",
+      alarmeData: "2026-05-22",
+      alarmeNota: "Alarme automático (60 dias após a pronúncia)",
+      alarmeDias: 60,
+      historicoAtos: [
+        {
+          id: generateId(),
+          data: "2026-03-22",
+          descricao: "Despacho de Pronúncia Criminal Proferido pelo Juiz",
+          fase: "Instrução",
+          tipoAto: "Despacho de Pronúncia",
+          documentosIds: [],
+          createdAt: new Date().toISOString()
+        },
+        {
+          id: generateId(),
+          data: "2026-02-18",
+          descricao: "Dedução de Acusação Formal pelo Ministério Público",
+          fase: "Inquérito",
+          tipoAto: "Acusação formal (Ministério Público)",
+          documentosIds: [],
+          parteAssociada: "Ministério Público de Moçambique",
+          createdAt: new Date().toISOString()
+        },
+        {
+          id: generateId(),
+          data: "2026-01-10",
+          descricao: "Autuação e Abertura de Inquérito de Polícia de Investigação",
+          fase: "Inquérito",
+          tipoAto: "Auto de Notícia",
+          documentosIds: [],
+          createdAt: new Date().toISOString()
+        }
+      ],
+      agendaCompromissos: [
+        {
+          id: generateId(),
+          titulo: "Audiência de Julgamento Criminal de Discussão da Matéria de Facto",
+          dataLimite: "2026-07-05",
+          destinatario: "Arguidos e Testemunhas",
+          responsavel: "Dr. Tomás Nhassengo",
+          fase: "Julgamento",
+          createdAt: new Date().toISOString()
+        }
+      ]
+    }
+  ];
+
+  localStorage.setItem(STORAGE_KEYS.PROCESSOS, JSON.stringify(processos));
+
+  return { success: true, message: "Dados de demonstração de Moçambique semeados com total sucesso!", processos };
+}
+
 

@@ -114,15 +114,15 @@ export const AdminHierarchyPanel: React.FC<{ processos: Processo[] }> = ({ proce
     const usedProcessos = processos.filter(p => p.tipo === areaNome && p.especieCivel === especieNome && p.tipoAccaoCivel === accaoNome && !p.deleted);
     if (usedProcessos.length > 0) {
         const nums = usedProcessos.map(p => p.numero).join(', ');
-        alert(`Não é possível eliminar o tipo de ação "${accaoNome}" porque está associado a registos ativos.\n\nProcessos afetados: ${nums}\n\nPor favor, edite ou arquive estes processos primeiro para poder prosseguir.`);
+        alert(`Não é possível arquivar o tipo de ação "${accaoNome}" porque está associado a registos ativos.\n\nProcessos afetados: ${nums}\n\nPor favor, edite ou arquive estes processos primeiro para poder prosseguir.`);
         return;
     }
-    if (confirm(`Deseja eliminar definitivamente o tipo de ação "${accaoNome}"?`)) {
+    if (confirm(`Deseja arquivar o tipo de ação "${accaoNome}"? Ele ficará disponível para restauro no Arquivo.`)) {
       save(areas.map(a => a.id === areaId ? {
         ...a,
         especies: a.especies.map(e => e.especie === especieNome ? {
           ...e,
-          accoes: e.accoes.filter(ac => ac.nome !== accaoNome)
+          accoes: e.accoes.map(ac => ac.nome === accaoNome ? { ...ac, deleted: true, deletedAt: new Date().toISOString() } : ac)
         } : e)
       } : a));
     }

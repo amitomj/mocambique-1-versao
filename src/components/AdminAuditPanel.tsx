@@ -6,7 +6,7 @@ import { User, Processo } from '../types';
 import * as XLSX from 'xlsx';
 import { Download } from 'lucide-react';
 
-export const AdminAuditPanel: React.FC = () => {
+export const AdminAuditPanel: React.FC<{ restrictToProcesses?: string[] }> = ({ restrictToProcesses }) => {
     const [logs, setLogs] = useState<AuditLogEntry[]>([]);
     const [users, setUsers] = useState<User[]>([]);
     const [processos, setProcessos] = useState<Processo[]>([]);
@@ -16,13 +16,26 @@ export const AdminAuditPanel: React.FC = () => {
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
 
+    const restrictKey = restrictToProcesses?.join(',') || '';
+
     useEffect(() => {
         setLogs(getAuditLogs());
         setUsers(getUsers());
-        setProcessos(getProcessos());
-    }, []);
+        
+        const allProcs = getProcessos();
+        if (restrictToProcesses) {
+            setProcessos(allProcs.filter(p => restrictToProcesses.includes(p.numero)));
+        } else {
+            setProcessos(allProcs);
+        }
+    }, [restrictKey]);
 
     const filteredLogs = logs.filter(log => {
+        // Strict restriction for judges: only show logs from their associated processes
+        if (restrictToProcesses && (!log.processoNumero || !restrictToProcesses.includes(log.processoNumero))) {
+            return false;
+        }
+
         const userMatch = filterUser === '' || log.username === filterUser;
         const procMatch = filterProcesso === '' || (log.processoNumero || '').includes(filterProcesso);
         const logDate = new Date(log.timestamp);
